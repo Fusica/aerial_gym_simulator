@@ -25,6 +25,28 @@ def asset_class_to_AssetOptions(asset_class):
     asset_options.max_angular_velocity = asset_class.max_angular_velocity
     asset_options.max_linear_velocity = asset_class.max_linear_velocity
     asset_options.disable_gravity = asset_class.disable_gravity
+    if hasattr(asset_class, "armature"):
+        asset_options.armature = asset_class.armature
+    if hasattr(asset_class, "thickness"):
+        asset_options.thickness = asset_class.thickness
+    if hasattr(asset_class, "use_mesh_materials"):
+        asset_options.use_mesh_materials = asset_class.use_mesh_materials
+    if hasattr(asset_class, "override_com"):
+        asset_options.override_com = asset_class.override_com
+    if hasattr(asset_class, "override_inertia"):
+        asset_options.override_inertia = asset_class.override_inertia
+    if hasattr(asset_class, "convex_decomposition_from_submeshes"):
+        asset_options.convex_decomposition_from_submeshes = (
+            asset_class.convex_decomposition_from_submeshes
+        )
+    if hasattr(asset_class, "vhacd_enabled"):
+        asset_options.vhacd_enabled = asset_class.vhacd_enabled
+    if hasattr(asset_class, "vhacd_params"):
+        for key, value in vars(asset_class.vhacd_params).items():
+            if key.startswith("_"):
+                continue
+            if hasattr(asset_options.vhacd_params, key):
+                setattr(asset_options.vhacd_params, key, value)
     return asset_options
 
 

@@ -4,8 +4,7 @@
     <visual>
       <origin xyz="0 0 0.0"/>
       <geometry>
-        <box size="0.4 0.4 0.025"/>
-        <!-- <cylinder radius="0.2" length="0.025"/> -->
+        <cylinder radius="0.2" length="0.025"/>
       </geometry>
       <material name="White">
         <color rgba="1 1 1 1.0"/>
@@ -14,13 +13,12 @@
     <collision>
       <origin xyz="0 0 0"/>
       <geometry>
-        <box size="0.4 0.4 0.4"/>
-        <!-- <sphere radius="0.2"/> -->
+        <sphere radius="0.2"/>
       </geometry>
     </collision>
     <inertial>
-      <mass value="1.2"/>
-      <inertia ixx="0.013" ixy="0.0" ixz="0.0" iyy="0.014" iyz="0.0" izz="0.013"/>
+      <mass value="1.9"/>
+      <inertia ixx="0.05" ixy="0.0" ixz="0.0" iyy="0.05" iyz="0.0" izz="0.05"/>
     </inertial>
   </link>
   <link name="front_left_prop">
@@ -28,7 +26,6 @@
       <origin xyz="0 0 0"/>
       <geometry>
         <cylinder radius="0.05" length="0.07"/>
-        <!-- <box size="0.1 0.1 0.07"/> -->
       </geometry>
       <material name="Orange">
         <color rgba="1 0.423 0.03921568627 1.0"/>
@@ -43,7 +40,6 @@
     <visual>
       <origin xyz="0 0 0"/>
       <geometry>
-      <!-- <box size="0.1 0.1 0.07"/> -->
         <cylinder radius="0.05" length="0.07"/>
       </geometry>
       <material name="Orange">
@@ -59,7 +55,6 @@
     <visual>
       <origin xyz="0 0 0"/>
       <geometry>
-      <!-- <box size="0.1 0.1 0.07"/> -->
         <cylinder radius="0.05" length="0.07"/>
       </geometry>
       <material name="Blue">
@@ -75,7 +70,6 @@
     <visual>
       <origin xyz="0 0 0"/>
       <geometry>
-      <!-- <box size="0.1 0.1 0.07"/> -->
         <cylinder radius="0.05" length="0.07"/>
       </geometry>
       <material name="Blue">

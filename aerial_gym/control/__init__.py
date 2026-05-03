@@ -9,6 +9,7 @@ from aerial_gym.control.controllers.velocity_steeing_angle_controller import (
     LeeVelocitySteeringAngleController,
 )
 from aerial_gym.control.controllers.rates_control import LeeRatesController
+from aerial_gym.control.controllers.thrust_bodyrate_control import ThrustBodyRateController
 from aerial_gym.control.controllers.no_control import NoControl
 
 
@@ -18,6 +19,9 @@ from aerial_gym.config.controller_config.lee_controller_config import (
 )
 from aerial_gym.config.controller_config.no_control_config import (
     control as no_control_config,
+)
+from aerial_gym.config.controller_config.thrust_bodyrate_controller_config import (
+    control as thrust_bodyrate_controller_config,
 )
 
 from aerial_gym.config.controller_config.lee_controller_config_octarotor import (
@@ -37,6 +41,11 @@ from aerial_gym.config.controller_config.lmf2_controller_config import (
 from aerial_gym.registry.controller_registry import controller_registry
 
 controller_registry.register_controller("no_control", NoControl, no_control_config)
+controller_registry.register_controller(
+    "thrust_bodyrate_control",
+    ThrustBodyRateController,
+    thrust_bodyrate_controller_config,
+)
 controller_registry.register_controller(
     "lee_acceleration_control", LeeAccelerationController, lee_controller_config
 )

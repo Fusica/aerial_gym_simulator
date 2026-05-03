@@ -128,7 +128,7 @@ class RobotManagerIGE(BaseManager):
         self.robot.init_tensors(self.global_tensor_dict)
 
         if not self.use_warp:
-            logger.error("Not using warp. Initializing sensors")
+            logger.info("Using Isaac Gym sensor initialization path because use_warp=False.")
             if self.cfg.sensor_config.enable_lidar:
                 raise ValueError(
                     "Lidar sensors are not supported using Isaac Gym Rendering. Please enable warp."
@@ -430,7 +430,7 @@ class RobotManagerIGE(BaseManager):
             logger.warning(
                 "Calculated robot mass and inertia for this robot. This code assumes that your robot is the same across environments."
             )
-            logger.critical(
+            logger.warning(
                 "If your robot differs across environments you need to perform this computation for each different robot here."
             )
         else:

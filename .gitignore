@@ -11,3 +11,5 @@ nn/
 train_dir/
 wandb/
 runs/
+
+.vscode/

@@ -29,9 +29,12 @@ class ControlAllocator:
         self.force_torque_allocation_matrix = torch.tensor(
             self.cfg.allocation_matrix, device=self.device, dtype=torch.float32
         )
-        alloc_matrix_rank = torch.linalg.matrix_rank(self.force_torque_allocation_matrix)
-        if alloc_matrix_rank < 6:
-            print("WARNING: allocation matrix is not full rank. Rank: {}".format(alloc_matrix_rank))
+        alloc_matrix_rank = int(torch.linalg.matrix_rank(self.force_torque_allocation_matrix).item())
+        expected_rank = min(6, self.cfg.num_motors)
+        if alloc_matrix_rank < expected_rank:
+            logger.warning(
+                f"Allocation matrix rank is {alloc_matrix_rank}, expected at least {expected_rank}."
+            )
         self.force_torque_allocation_matrix = self.force_torque_allocation_matrix.expand(
             self.num_envs, -1, -1
         )
@@ -45,8 +48,9 @@ class ControlAllocator:
             config=self.cfg.motor_model_config,
             device=self.device,
         )
-        logger.warning(
-            f"Control allocation does not account for actuator limits. This leads to suboptimal allocation"
+        logger.info(
+            "Actuator limits are applied by the motor model after allocation; "
+            "the pseudo-inverse allocator itself is unconstrained."
         )
 
     def allocate_output(self, command, output_mode):

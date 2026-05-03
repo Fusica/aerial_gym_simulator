@@ -6,6 +6,7 @@ from aerial_gym.config.robot_config.base_rov_config import BaseROVCfg
 from aerial_gym.config.robot_config.base_quad_root_link_control_config import (
     BaseQuadRootLinkControlCfg,
 )
+from aerial_gym.config.robot_config.pursuit_quad_direct_config import PursuitQuadDirectCfg
 
 from aerial_gym.config.robot_config.lmf1_config import LMF1Cfg
 from aerial_gym.config.robot_config.lmf2_config import LMF2Cfg
@@ -21,6 +22,7 @@ from aerial_gym.config.robot_config.lmf2_config import LMF2Cfg
 
 # import robot classes here
 from aerial_gym.robots.base_multirotor import BaseMultirotor
+from aerial_gym.robots.pursuit_quad_direct import PursuitQuadDirect
 from aerial_gym.robots.base_rov import BaseROV
 from aerial_gym.robots.base_reconfigurable import BaseReconfigurable
 from aerial_gym.robots.morphy import Morphy
@@ -33,6 +35,7 @@ from aerial_gym.config.robot_config.base_quad_config import *
 
 # register the robot classes here
 robot_registry.register("base_quadrotor", BaseMultirotor, BaseQuadCfg)
+robot_registry.register("pursuit_quad_direct", PursuitQuadDirect, PursuitQuadDirectCfg)
 robot_registry.register("base_octarotor", BaseMultirotor, BaseOctarotorCfg)
 robot_registry.register("base_random", BaseMultirotor, BaseRandCfg)
 robot_registry.register("base_quad_root_link_control", BaseMultirotor, BaseQuadRootLinkControlCfg)
@@ -59,4 +62,3 @@ robot_registry.register("base_quadrotor_with_faceid_normal_camera", BaseMultirot
 robot_registry.register("base_quadrotor_with_stereo_camera", BaseMultirotor, BaseQuadWithStereoCameraCfg)
 
 robot_registry.register("tinyprop", BaseMultirotor, TinyPropCfg)
-

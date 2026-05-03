@@ -1,0 +1,22 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<robot name="pursuit_static_cylinder">
+  <link name="base_link">
+    <inertial>
+      <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0"/>
+      <mass value="20.0"/>
+      <inertia ixx="1.0" ixy="0.0" ixz="0.0" iyy="1.0" iyz="0.0" izz="1.0"/>
+    </inertial>
+    <visual name="cylinder_visual">
+      <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0"/>
+      <geometry>
+        <cylinder radius="300.0" length="1000.0"/>
+      </geometry>
+    </visual>
+    <collision name="cylinder_collision">
+      <origin xyz="0.0 0.0 0.0" rpy="0.0 0.0 0.0"/>
+      <geometry>
+        <cylinder radius="300.0" length="1000.0"/>
+      </geometry>
+    </collision>
+  </link>
+</robot>

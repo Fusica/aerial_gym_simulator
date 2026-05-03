@@ -42,12 +42,8 @@ class MotorModel:
 
     def init_tensors(self, global_tensor_dict=None):
         self.current_motor_thrust = torch_rand_float_tensor(
-            torch.tensor(self.min_thrust, device=self.device, dtype=torch.float32).expand(
-                self.num_envs, self.num_motors_per_robot
-            ),
-            torch.tensor(self.max_thrust, device=self.device, dtype=torch.float32).expand(
-                self.num_envs, self.num_motors_per_robot
-            ),
+            self.min_thrust,
+            self.max_thrust,
         )
         self.motor_time_constants_increasing = torch_rand_float_tensor(
             self.motor_time_constant_increasing_min, self.motor_time_constant_increasing_max
