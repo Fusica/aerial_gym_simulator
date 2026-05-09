@@ -186,7 +186,7 @@ def make_run_name(task: str) -> str:
 
     beijing_time = datetime.now(timezone(timedelta(hours=8)))
     time_str = beijing_time.strftime("%Y%m%d_%H%M%S")
-    return f"{task}__{time_str}"
+    return f"PE_{time_str}"
 
 
 def extract_agent_state_dict(checkpoint):

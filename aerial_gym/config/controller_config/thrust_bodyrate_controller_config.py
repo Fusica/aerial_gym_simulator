@@ -7,10 +7,11 @@ class control:
     """
 
     num_actions = 4
-    scale_input = [1.0, 4.0, 4.0, 2.0]
+    # Keep body-rate commands inside the root-link allocator's motor-feasible range.
+    scale_input = [1.0, 2.0, 2.0, 0.2]
     kOmega = [1.0, 1.0, 0.8]
     kOmegaI = [0.0, 0.0, 0.0]
     kOmegaD = [0.0, 0.0, 0.0]
     omegaIntegralLimit = [0.0, 0.0, 0.0]
-    torqueLimit = [float("inf"), float("inf"), float("inf")]
+    torqueLimit = [2.4, 2.4, 0.18]
     randomize_params = False

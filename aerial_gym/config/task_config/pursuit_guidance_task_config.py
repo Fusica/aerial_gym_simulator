@@ -5,7 +5,7 @@ class task_config:
     seed = 1
     sim_name = "base_sim"
     env_name = "pursuit_guidance_env"
-    robot_name = "pursuit_quad_direct"
+    robot_name = "base_quad_root_link_control"
     controller_name = "thrust_bodyrate_control"
     args = {}
     num_envs = 512
