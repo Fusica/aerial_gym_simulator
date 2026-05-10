@@ -13,3 +13,6 @@ wandb/
 runs/
 
 .vscode/
+.codex/
+.claude/
+.agents/

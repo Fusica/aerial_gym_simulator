@@ -1,0 +1,7 @@
+searches:
+  - query: "pursuit-evasion reinforcement learning UAV drone limited perception prediction risk"
+    num_results: 120
+    notes: "Manual curation from seed BibTeX plus web expansion; network-restricted shell prevented automated search."
+output:
+  root: /home/ubuntu/projects/aerial_gym_simulator/deep-research-output/perceptual-risk-pursuit-review/phase2_survey/search_results
+  overwrite: true

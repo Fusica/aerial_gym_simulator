@@ -1,0 +1,7 @@
+searches:
+  - query: "UAV pursuit-evasion reinforcement learning partial observability perception risk prediction"
+    num_results: 50
+    notes: "Manual/web fallback used in this environment because local paper search scripts cannot access the network."
+output:
+  root: /home/ubuntu/projects/aerial_gym_simulator/deep-research-output/perceptual-risk-pursuit-review/phase1_frontier/search_results
+  overwrite: true
