@@ -162,3 +162,8 @@ class task_config:
         obstacle_hard_margin = 50.0
         avoid_margin = 60.0
         static_obstacle_radius = 300.0
+
+    class curriculum:
+        enabled = True
+        thresholds = [5.0, 3.0, 1.0]
+        stage_step_budgets = [400_000_000, 400_000_000]

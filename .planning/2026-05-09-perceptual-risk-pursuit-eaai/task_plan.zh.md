@@ -9,7 +9,7 @@
 
 ## 活动计划
 - **计划 ID：** `2026-05-09-perceptual-risk-pursuit-eaai`
-- **当前阶段：** 第 6 阶段——实现与验证
+- **当前阶段：** 第 6.2 阶段——策略池构建与风险数据采集
 - **总体状态：** in_progress
 - **投稿规则：** 所有方法、实验和写作都必须服务于下面锁定的 EAAI 声明。
 
@@ -111,14 +111,40 @@
 - [x] 加入近邻比较论文和修订后的 gap 表述。
 - **状态：** complete
 
-### 第 6 阶段：实现与验证
-- [ ] 实现 risk geometry 和标签生成。
-- [ ] 实现 dataset manifest 和离线风险训练。
-- [ ] 实现 depth stack 输入和冻结 `z_depth` 路径。
-- [ ] 实现 B1-B5 观测/控制模式。
-- [ ] 实现动作条件风险修正。
-- [ ] 大规模训练前运行 smoke test 和小 rollout 诊断。
+### 第 6.1 阶段：控制器验证与课程学习 B0 baseline（前置阶段）
+- [x] 控制器参数对比：激进（e1, scale=[1,3,3,1.5]）vs 保守（默认, scale=[1,2,2,0.2]）→ 保守碾压激进（0.97% vs 0% SR）。控制器限制 = 隐式正则化器。
+- [x] 确认仓库默认控制器参数为 baseline，不再探索放大限制。
+- [x] 课程学习对比：手动（每阶段 `total_timesteps=400M` × 3）vs 自动（`total_timesteps=1.2B` × 1）→ 自动 100% SR，手动 77.2%。
+- [x] 根因：`total_timesteps` 影响全局 entropy 衰减速度。手动每阶段重置 entropy=0.01，1m 精度阶段噪声过高。自动 `total_timesteps=1.2B` 使 ent 自然匹配难度。
+- [x] B0 在默认控制器 + `--curriculum --no-early-stop` + `total_timesteps=1.2B` 下达到 **100% 成功率**。
+- **状态：** complete
+
+### 第 6.2 阶段：策略池构建与风险数据采集（当前阶段）
+- [ ] 设计多维专家策略池（解决单策略数据偏差问题）。
+- [ ] 确定策略池来源：不同训练阶段、不同课程阈值、不同 seed。
+- [ ] 验证 `risk_geometry.py` 标签生成在策略池 rollout 上的正确性。
+- [ ] 采集带可观测性标签的 rollout 数据。
+- [ ] 构建 dataset manifest（非最终带depth的数据）。
 - **状态：** in_progress
+
+### 第 6.3 阶段：离线风险模型训练
+- [ ] 实现 depth stack 输入路径和冻结 `z_depth = 64` encoder。
+- [ ] 实现 `p_lost(s_red)` 和 `R_obs(s_red, u)` 预测头。
+- [ ] 离线训练和校准。
+- [ ] 验证离线指标（ECE、Brier score、AUROC）。
+- **状态：** pending
+
+### 第 6.4 阶段：降信息策略实现（B1-B5）
+- [ ] 实现 B1-B5 观测/控制模式。
+- [ ] 实现动作条件风险修正层。
+- [ ] large-scale 训练前运行 smoke test 和小 rollout 诊断。
+- **状态：** pending
+
+### 第 6.5 阶段：完整训练与评估
+- [ ] B0-B5 全部训练完成。
+- [ ] 论文图表和统计分析。
+- [ ] 敏感性分析（H ∈ {100, 200}、FOV 扰动）。
+- **状态：** pending
 
 ## 明确推迟
 - 完整 RGB 视觉追逐。
@@ -130,3 +156,5 @@
 | 错误 | 处理 |
 |------|------|
 | planning 中保留了较弱中间路线 | 已重写为单一 EAAI 强主线 |
+| `risk_geometry` 测试直接导入 `aerial_gym.task...` 会触发 Isaac Gym/gymtorch 初始化 | 将 `risk_geometry.py` 保持为轻量纯 PyTorch 模块，测试用文件路径加载，避免离线单测依赖仿真初始化 |
+| 最初分析认为 robot_name 是手动/自动 run 差异来源 | 用户在旧 run 前已手动修改 robot name，两者实际相同。根因是 `total_timesteps` 对 entropy 衰减的影响 |

@@ -64,6 +64,18 @@ def parse_args():
     parser.add_argument("--min-thrust-weight", type=float, default=0.70)
     parser.add_argument("--max-thrust-weight", type=float, default=1.35)
     parser.add_argument("--no-plot", action="store_true", default=False)
+    parser.add_argument(
+        "--override-scale-input", nargs=4, type=float, default=None,
+        help="Override controller scale_input [thrust, p, q, r]",
+    )
+    parser.add_argument(
+        "--override-komega", nargs=3, type=float, default=None,
+        help="Override controller kOmega [p, q, r gains]",
+    )
+    parser.add_argument(
+        "--override-torquelimit", nargs=3, type=float, default=None,
+        help="Override controller torqueLimit [x, y, z Nm]",
+    )
     return parser.parse_args()
 
 
@@ -96,6 +108,20 @@ def make_headless_task(args):
         args.device,
     ]
     try:
+        if (
+            args.override_scale_input is not None
+            or args.override_komega is not None
+            or args.override_torquelimit is not None
+        ):
+            from aerial_gym.registry.controller_registry import controller_registry
+
+            cfg = controller_registry.get_controller_config("thrust_bodyrate_control")
+            if args.override_scale_input is not None:
+                cfg.scale_input = list(args.override_scale_input)
+            if args.override_komega is not None:
+                cfg.kOmega = list(args.override_komega)
+            if args.override_torquelimit is not None:
+                cfg.torqueLimit = list(args.override_torquelimit)
         return task_registry.make_task(
             task_name=args.task,
             seed=args.seed,

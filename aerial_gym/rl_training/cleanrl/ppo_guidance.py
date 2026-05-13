@@ -65,6 +65,7 @@ from aerial_gym.registry.task_registry import task_registry
 WANDB_LOGGING_FAILED = False
 WANDB_SYNCED_CODE_FILES = {
     "aerial_gym/rl_training/cleanrl/ppo_guidance.py",
+    "aerial_gym/rl_training/cleanrl/curriculum/curriculum_controller.py",
     "aerial_gym/task/pursuit_guidance_task/pursuit_guidance_task.py",
     "aerial_gym/config/task_config/pursuit_guidance_task_config.py",
     "aerial_gym/control/controllers/thrust_bodyrate_control.py",
@@ -86,6 +87,33 @@ def resolve_output_action_command_names(controller_name: str):
     if controller_name == "thrust_bodyrate_control":
         return ("thrust", "p_rate", "q_rate", "r_rate")
     return tuple(f"cmd_{idx}" for idx in range(4))
+
+
+def cli_arg_provided(argv, option_name):
+    return any(token == option_name or token.startswith(f"{option_name}=") for token in argv)
+
+
+def apply_curriculum_config_defaults(args, task_config, argv):
+    curriculum_cfg = getattr(task_config, "curriculum", None)
+    if curriculum_cfg is None:
+        return args
+
+    if not cli_arg_provided(argv, "--curriculum") and not cli_arg_provided(argv, "--no-curriculum"):
+        args.curriculum = bool(getattr(curriculum_cfg, "enabled", args.curriculum))
+
+    config_to_arg = (
+        ("thresholds", "curriculum_thresholds", "--curriculum-thresholds"),
+        ("stage_step_budgets", "curriculum_stage_step_budgets", "--curriculum-stage-step-budgets"),
+    )
+    for config_name, arg_name, option_name in config_to_arg:
+        if cli_arg_provided(argv, option_name) or not hasattr(curriculum_cfg, config_name):
+            continue
+        value = getattr(curriculum_cfg, config_name)
+        if config_name == "thresholds":
+            value = list(value)
+        setattr(args, arg_name, value)
+
+    return args
 
 
 def get_learning_rate(step, warmup_steps, total_steps, base_lr, min_lr_ratio=0.01):
@@ -305,7 +333,7 @@ def get_args():
         {"name": "--wandb-mode", "type": str, "default": "online", "help": "WandB mode: online, offline, or disabled."},
 
         # Algorithm specific arguments
-        {"name": "--total-timesteps", "type":int, "default": 400000000,
+        {"name": "--total-timesteps", "type":int, "default": 1200000000,
             "help": "total timesteps of the experiments"},
         {"name": "--learning-rate", "type":float, "default": 0.0003, # 降低学习率以适应稳定的reward范围
             "help": "the learning rate of the optimizer"},
@@ -355,6 +383,11 @@ def get_args():
         {"name": "--early-stop-success-delta", "type": float, "default": 0.005, "help": "success_rate被视为显著提升的最小增量"},
         {"name": "--early-stop-length-delta", "type": float, "default": 10.0, "help": "当success_rate近似持平时，avg_episode_length被视为显著改善的最小下降步数"},
         {"name": "--early-stop-min-episodes", "type": int, "default": 64, "help": "单个update至少统计到多少个结束episode才参与best/early-stop判断"},
+        # Curriculum learning
+        {"name": "--curriculum", "action": "store_true", "default": False, "help": "Enable automatic multi-stage curriculum learning"},
+        {"name": "--no-curriculum", "action": "store_true", "default": False, "help": "Disable curriculum learning"},
+        {"name": "--curriculum-thresholds", "type": float, "nargs": "+", "default": [5.0, 3.0, 1.0], "help": "Success distance thresholds per curriculum stage (meters)"},
+        {"name": "--curriculum-stage-step-budgets", "type": int, "nargs": "+", "default": [400000000, 400000000], "help": "Global-step budgets for every non-final curriculum stage"},
         ]
 
     # parse arguments
@@ -387,6 +420,11 @@ def get_args():
         args.early_stop = False
     else:
         args.early_stop = True
+
+    if hasattr(args, "no_curriculum") and args.no_curriculum:
+        args.curriculum = False
+    else:
+        args.curriculum = getattr(args, "curriculum", False)
 
     # name allignment
     args.sim_device_id = args.compute_device_id
@@ -693,6 +731,7 @@ class Agent(nn.Module):
 
     
 if __name__ == "__main__":
+    launch_argv = sys.argv[1:]
     args = get_args()
     if args.resume and args.play:
         raise ValueError("--resume cannot be used together with --play.")
@@ -736,6 +775,9 @@ if __name__ == "__main__":
         run_dir = infer_run_dir(args.checkpoint, loaded_checkpoint)
         run_name = loaded_checkpoint.get("run_name") or os.path.basename(os.path.normpath(run_dir))
         wandb_run_id = loaded_checkpoint.get("wandb_run_id")
+
+    base_task_config = task_registry.get_task_config(args.task)
+    apply_curriculum_config_defaults(args, base_task_config, launch_argv)
 
     if not args.play:
         if run_name is None:
@@ -807,6 +849,11 @@ if __name__ == "__main__":
                 f"Best checkpoint saving: {'ENABLED' if args.save_best else 'DISABLED'} "
                 f"| metric=hybrid_success_then_return_fallback | early_stop={'ENABLED' if args.early_stop else 'DISABLED'} "
                 f"| run_dir={run_dir}"
+            )
+            print(
+                f"Curriculum: {'ENABLED' if args.curriculum else 'DISABLED'} "
+                f"| thresholds={args.curriculum_thresholds} "
+                f"| stage_step_budgets={args.curriculum_stage_step_budgets}"
             )
     else:
         if args.track:
@@ -926,6 +973,26 @@ if __name__ == "__main__":
     num_updates = args.total_timesteps // args.batch_size
 
     if not args.play:
+        # Curriculum controller initialization
+        curriculum_controller = None
+        if args.curriculum:
+            from aerial_gym.rl_training.cleanrl.curriculum.curriculum_controller import (
+                CurriculumController,
+            )
+            curriculum_controller = CurriculumController(
+                task_config=env_cfg,
+                args=args,
+                checkpoint_fn=build_training_checkpoint,
+            )
+            if args.resume and loaded_checkpoint is not None and "curriculum" in loaded_checkpoint:
+                curriculum_controller.load_state_dict(loaded_checkpoint["curriculum"])
+                env_cfg.reward.success_threshold = curriculum_controller.current_threshold
+                print(
+                    f"Resumed curriculum: stage {curriculum_controller.stage_idx}, "
+                    f"threshold {curriculum_controller.current_threshold:.1f}m, "
+                    f"started at update {curriculum_controller.stage_start_update}"
+                )
+
         last_update_score = None
         best_path = os.path.join(run_dir, "best.pth")
         latest_path = os.path.join(run_dir, "latest.pth")
@@ -1300,12 +1367,23 @@ if __name__ == "__main__":
                         float(episode_rewards_summary["count"])
                     )
                     writer.add_scalar("metrics/success_rate", succ_rate, global_step)
+                current_threshold_reach_rate = None
                 if episode_rewards_summary["min_relative_dist"]:
                     for threshold_m, threshold_tag in ((10.0, "10m"), (5.0, "5m"), (3.0, "3m"), (1.0, "1m")):
                         reach_rate = float(
                             sum(1.0 if d <= threshold_m else 0.0 for d in episode_rewards_summary["min_relative_dist"])
                         ) / float(len(episode_rewards_summary["min_relative_dist"]))
                         writer.add_scalar(f"metrics/reach_rate_{threshold_tag}", reach_rate, global_step)
+                    if curriculum_controller is not None:
+                        threshold_m = float(curriculum_controller.current_threshold)
+                        current_threshold_reach_rate = float(
+                            sum(1.0 if d <= threshold_m else 0.0 for d in episode_rewards_summary["min_relative_dist"])
+                        ) / float(len(episode_rewards_summary["min_relative_dist"]))
+                        writer.add_scalar(
+                            "metrics/reach_rate_current_threshold",
+                            current_threshold_reach_rate,
+                            global_step,
+                        )
                 if avg_len is not None and args.gamma > 0.0:
                     gamma_to_avg_len = float(np.exp(avg_len * np.log(args.gamma)))
                     writer.add_scalar("diagnostics/gamma_to_avg_len", gamma_to_avg_len, global_step)
@@ -1353,6 +1431,8 @@ if __name__ == "__main__":
                             sum(1.0 if d <= threshold_m else 0.0 for d in episode_rewards_summary["min_relative_dist"])
                         ) / float(len(episode_rewards_summary["min_relative_dist"]))
                         wandb_episode_log[f"metrics/reach_rate_{threshold_tag}"] = reach_rate
+                    if current_threshold_reach_rate is not None:
+                        wandb_episode_log["metrics/reach_rate_current_threshold"] = current_threshold_reach_rate
                 if avg_len is not None and args.gamma > 0.0:
                     wandb_episode_log["diagnostics/gamma_to_avg_len"] = gamma_to_avg_len
                 wandb_log(wandb_episode_log, global_step, commit=False)
@@ -1377,6 +1457,37 @@ if __name__ == "__main__":
                         float(avg_len),
                     )
                 last_update_score = score
+
+                # Curriculum transition check
+                if curriculum_controller is not None:
+                    transition = curriculum_controller.update(
+                        global_step=global_step,
+                        update=update,
+                        succ_rate=succ_rate,
+                        episode_rewards_summary=episode_rewards_summary,
+                        agent=agent,
+                        optimizer=optimizer,
+                        run_dir=run_dir,
+                        run_name=run_name,
+                        wandb_run_id=wandb_run_id,
+                        current_ent_coef=current_ent_coef,
+                    )
+                    if transition is not None:
+                        print(
+                            f"\n{'='*60}\n"
+                            f"CURRICULUM TRANSITION\n"
+                            f"  Stage {transition['stage_idx']-1} -> Stage {transition['stage_idx']}\n"
+                            f"  Threshold: {transition['old_threshold']:.1f}m -> {transition['new_threshold']:.1f}m\n"
+                            f"  Type: {transition['transition_info']['type']}\n"
+                            f"  Reason: {transition['transition_info']['reason']}\n"
+                            f"  Stage checkpoint: {transition['stage_ckpt_path']}\n"
+                            f"{'='*60}\n"
+                        )
+                        no_improve_updates = 0
+                    # Log curriculum metrics
+                    curriculum_controller.log_curriculum_metrics(
+                        writer, global_step, update, succ_rate
+                    )
 
             # bootstrap value if not done
             with torch.no_grad():
@@ -1722,10 +1833,16 @@ if __name__ == "__main__":
                 run_dir=run_dir,
                 wandb_run_id=wandb_run_id,
             )
+            if curriculum_controller is not None:
+                latest_checkpoint["curriculum"] = curriculum_controller.get_state_dict()
             torch.save(latest_checkpoint, latest_path)
 
             if args.early_stop:
-                if last_update_score is None:
+                # When curriculum is active, only apply early stop on the final stage
+                if curriculum_controller is not None and not curriculum_controller.is_on_final_stage():
+                    writer.add_scalar("early_stop/armed", 0.0, global_step)
+                    writer.add_scalar("early_stop/no_improve_updates", 0, global_step)
+                elif last_update_score is None:
                     print(
                         f"Early-stop check skipped at update {update}: "
                         f"finished_episodes < {args.early_stop_min_episodes}"
