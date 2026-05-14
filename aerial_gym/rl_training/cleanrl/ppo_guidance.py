@@ -33,6 +33,7 @@ import sys
 import random
 import time
 import uuid
+import json
 from typing import Optional
 
 try:
@@ -60,6 +61,7 @@ except ImportError:
 if not WANDB_AVAILABLE:
     wandb = None
 
+from aerial_gym.registry.env_registry import env_config_registry
 from aerial_gym.registry.task_registry import task_registry
 
 WANDB_LOGGING_FAILED = False
@@ -114,6 +116,37 @@ def apply_curriculum_config_defaults(args, task_config, argv):
         setattr(args, arg_name, value)
 
     return args
+
+
+def configure_target_asset_type(task_config, target_asset_type: Optional[str]):
+    if target_asset_type is None:
+        return None
+
+    env_config = env_config_registry.get_env_config(task_config.env_name)
+    include_asset_type = env_config.env_config.include_asset_type
+    asset_map = env_config.env_config.asset_type_to_dict_map
+    target_asset_types = [
+        asset_type for asset_type in include_asset_type.keys()
+        if str(asset_type).startswith("target_")
+    ]
+    if target_asset_type not in target_asset_types or target_asset_type not in asset_map:
+        raise ValueError(
+            f"Unknown target asset type {target_asset_type!r}. "
+            f"Available target assets: {target_asset_types}"
+        )
+
+    for asset_type in target_asset_types:
+        include_asset_type[asset_type] = asset_type == target_asset_type
+
+    asset_config = asset_map[target_asset_type]
+    return {
+        "target_asset_type": target_asset_type,
+        "asset_folder": getattr(asset_config, "asset_folder", None),
+        "file": getattr(asset_config, "file", None),
+        "controller_mass": getattr(asset_config, "controller_mass", None),
+        "max_linear_velocity": getattr(asset_config, "max_linear_velocity", None),
+        "max_angular_velocity": getattr(asset_config, "max_angular_velocity", None),
+    }
 
 
 def get_learning_rate(step, warmup_steps, total_steps, base_lr, min_lr_ratio=0.01):
@@ -207,6 +240,140 @@ def format_score(score):
         f"success_rate={success_rate:.3f}, avg_return={avg_return:.2f}, "
         f"avg_min_dist={avg_min_dist:.2f}, avg_len={avg_length:.1f}"
     )
+
+
+def json_safe(value):
+    if isinstance(value, dict):
+        return {str(k): json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(v) for v in value]
+    if torch.is_tensor(value):
+        if value.numel() == 1:
+            return json_safe(value.item())
+        return json_safe(value.detach().cpu().tolist())
+    if isinstance(value, np.ndarray):
+        return json_safe(value.tolist())
+    if isinstance(value, np.generic):
+        return json_safe(value.item())
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def append_jsonl(path: str, record: dict):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(json_safe(record), ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def score_to_dict(score):
+    if score is None:
+        return None
+    success_rate, avg_return, avg_min_dist, avg_length = score
+    return {
+        "success_rate": float(success_rate),
+        "avg_return": float(avg_return),
+        "avg_min_relative_dist": float(avg_min_dist),
+        "avg_episode_length": float(avg_length),
+    }
+
+
+def curriculum_metadata(curriculum_controller):
+    if curriculum_controller is None:
+        return None
+    state = curriculum_controller.get_state_dict()
+    return {
+        "stage_idx": int(state["stage_idx"]),
+        "current_threshold": float(state["current_threshold"]),
+        "stage_start_step": int(state["stage_start_step"]),
+        "stage_start_update": int(state["stage_start_update"]),
+        "thresholds": [float(v) for v in state.get("thresholds", [])],
+        "stage_step_budgets": [int(v) for v in state.get("stage_step_budgets", [])],
+        "stage_history": state.get("stage_history", []),
+    }
+
+
+def should_save_policy_pool_checkpoint(args, update: int, start_update: int, curriculum_transition) -> bool:
+    if not getattr(args, "save_policy_pool", False):
+        return False
+    if update == start_update:
+        return True
+    interval_updates = int(getattr(args, "policy_pool_save_interval_updates", 0))
+    if interval_updates > 0 and update % interval_updates == 0:
+        return True
+    return curriculum_transition is not None
+
+
+def policy_pool_save_reason(args, update: int, start_update: int, curriculum_transition):
+    reasons = []
+    if update == start_update:
+        reasons.append("first_update")
+    interval_updates = int(getattr(args, "policy_pool_save_interval_updates", 0))
+    if interval_updates > 0 and update % interval_updates == 0:
+        reasons.append("interval")
+    if curriculum_transition is not None:
+        reasons.append("curriculum_transition")
+    return reasons
+
+
+def build_policy_pool_metadata(
+    args,
+    run_name: str,
+    run_dir: str,
+    checkpoint_path: str,
+    global_step: int,
+    update: int,
+    start_update: int,
+    score,
+    episode_metrics,
+    update_metrics,
+    curriculum_controller,
+    curriculum_transition,
+    reasons,
+):
+    step_per_update = int(args.num_envs * args.num_steps)
+    return {
+        "schema_version": 1,
+        "source_family": "ppo",
+        "source_kind": "ppo_curriculum_checkpoint" if curriculum_controller is not None else "ppo_checkpoint",
+        "pool_role": "trajectory_data_source",
+        "checkpoint_type": "full_training_state",
+        "checkpoint_path": os.path.relpath(checkpoint_path, run_dir),
+        "checkpoint_abspath": os.path.abspath(checkpoint_path),
+        "run_name": run_name,
+        "run_dir": run_dir,
+        "update": int(update),
+        "global_step": int(global_step),
+        "start_update": int(start_update),
+        "total_timesteps": int(args.total_timesteps),
+        "progress_fraction": float(global_step) / float(max(args.total_timesteps, 1)),
+        "step_per_update": step_per_update,
+        "save_interval_updates": int(getattr(args, "policy_pool_save_interval_updates", 0)),
+        "save_reasons": reasons,
+        "score": score_to_dict(score),
+        "episode_metrics": episode_metrics,
+        "update_metrics": update_metrics,
+        "curriculum": curriculum_metadata(curriculum_controller),
+        "curriculum_transition": curriculum_transition,
+        "training_config": {
+            "task": args.task,
+            "seed": int(args.seed),
+            "num_envs": int(args.num_envs),
+            "num_steps": int(args.num_steps),
+            "batch_size": int(args.batch_size),
+            "total_timesteps": int(args.total_timesteps),
+            "learning_rate": float(args.learning_rate),
+            "ent_coef": float(args.ent_coef),
+            "ent_coef_final": float(args.ent_coef_final),
+            "gamma": float(args.gamma),
+            "gae_lambda": float(args.gae_lambda),
+            "curriculum_enabled": bool(getattr(args, "curriculum", False)),
+            "curriculum_thresholds": [float(v) for v in getattr(args, "curriculum_thresholds", [])],
+            "curriculum_stage_step_budgets": [
+                int(v) for v in getattr(args, "curriculum_stage_step_budgets", [])
+            ],
+        },
+    }
 
 
 def make_run_name(task: str) -> str:
@@ -322,6 +489,7 @@ def get_args():
         {"name": "--seed", "type": int, "default": 1, "help": "Random seed. Overrides config file if provided."},
         {"name": "--play", "required": False, "help": "only run network", "action": 'store_true'},
         {"name": "--play-steps", "type": int, "default": 3600, "help": "Maximum number of simulation steps to run in --play mode."},
+        {"name": "--target-asset-type", "type": str, "default": None, "choices": ["target_quad", "target_x500"], "help": "Optional target asset override for pursuit runs."},
         {"name": "--resume", "action": "store_true", "default": False, "help": "Resume training from a latest checkpoint with optimizer/global_step state."},
 
         {"name": "--torch-deterministic-off", "action": "store_true", "default": False, "help": "if toggled, `torch.backends.cudnn.deterministic=False`"},
@@ -375,6 +543,10 @@ def get_args():
         {"name": "--save-best", "action": "store_true", "default": True, "help": "启用基于指标的best.pth保存（注意：某些解析器对store_true默认值处理不一致）"},
         {"name": "--no-save-best", "action": "store_true", "default": False, "help": "禁用best.pth保存（覆盖 --save-best）"},
         {"name": "--best-metric", "type": str, "default": "hybrid_success_then_return_fallback", "help": "保存最优策略的指标：低成功率阶段优先avg_return/avg_min_relative_dist；成功后优先success_rate，其次avg_episode_length（越短越好）"},
+        {"name": "--save-policy-pool", "action": "store_true", "default": True, "help": "启用策略池中间checkpoint保存，默认每10个update保存一次"},
+        {"name": "--no-save-policy-pool", "action": "store_true", "default": False, "help": "禁用策略池中间checkpoint保存（覆盖 --save-policy-pool）"},
+        {"name": "--policy-pool-save-interval-updates", "type": int, "default": 10, "help": "策略池checkpoint保存间隔，单位为PPO update；默认10个update约18.4M steps"},
+        {"name": "--policy-pool-dir-name", "type": str, "default": "policy_pool", "help": "run目录下的策略池子目录名称"},
         # Early stopping
         {"name": "--early-stop", "action": "store_true", "default": True, "help": "启用早停：主看success_rate，辅看avg_episode_length"},
         {"name": "--no-early-stop", "action": "store_true", "default": False, "help": "禁用早停（覆盖 --early-stop）"},
@@ -415,6 +587,14 @@ def get_args():
         args.save_best = False
     else:
         args.save_best = True
+
+    if hasattr(args, "no_save_policy_pool") and args.no_save_policy_pool:
+        args.save_policy_pool = False
+    else:
+        args.save_policy_pool = True
+    if args.policy_pool_save_interval_updates < 0:
+        raise ValueError("--policy-pool-save-interval-updates must be >= 0")
+    args.policy_pool_dir_name = str(args.policy_pool_dir_name).strip() or "policy_pool"
 
     if hasattr(args, "no_early_stop") and args.no_early_stop:
         args.early_stop = False
@@ -778,6 +958,18 @@ if __name__ == "__main__":
 
     base_task_config = task_registry.get_task_config(args.task)
     apply_curriculum_config_defaults(args, base_task_config, launch_argv)
+    target_asset_metadata = configure_target_asset_type(
+        base_task_config, args.target_asset_type
+    )
+    if target_asset_metadata is not None:
+        print(
+            "Target asset override: "
+            f"{target_asset_metadata['target_asset_type']} | "
+            f"urdf={target_asset_metadata['asset_folder']}/{target_asset_metadata['file']} | "
+            f"controller_mass={target_asset_metadata['controller_mass']} | "
+            f"max_linear_velocity={target_asset_metadata['max_linear_velocity']} | "
+            f"max_angular_velocity={target_asset_metadata['max_angular_velocity']}"
+        )
 
     if not args.play:
         if run_name is None:
@@ -996,6 +1188,16 @@ if __name__ == "__main__":
         last_update_score = None
         best_path = os.path.join(run_dir, "best.pth")
         latest_path = os.path.join(run_dir, "latest.pth")
+        policy_pool_dir = os.path.join(run_dir, args.policy_pool_dir_name)
+        policy_pool_manifest_path = os.path.join(policy_pool_dir, "manifest.jsonl")
+        if args.save_policy_pool:
+            os.makedirs(policy_pool_dir, exist_ok=True)
+            print(
+                f"Policy pool checkpointing: ENABLED | dir={policy_pool_dir} "
+                f"| interval_updates={args.policy_pool_save_interval_updates}"
+            )
+        else:
+            print("Policy pool checkpointing: DISABLED")
         reward_cfg = getattr(env_cfg, "reward", None)
         success_threshold = float(getattr(reward_cfg, "success_threshold", 1.0))
         raw_reward_component_keys = [
@@ -1006,6 +1208,10 @@ if __name__ == "__main__":
             key for key in envs.reward_keys if key.startswith("contrib_")
         ]
         for update in range(start_update, num_updates + 1):
+            policy_pool_episode_metrics = None
+            policy_pool_score = None
+            policy_pool_curriculum_transition = None
+
             # 学习率调度
             if args.use_lr_scheduler:
                 # 使用新的 warmup + 余弦衰减调度器（基于global_step）
@@ -1368,11 +1574,13 @@ if __name__ == "__main__":
                     )
                     writer.add_scalar("metrics/success_rate", succ_rate, global_step)
                 current_threshold_reach_rate = None
+                reach_rates = {}
                 if episode_rewards_summary["min_relative_dist"]:
                     for threshold_m, threshold_tag in ((10.0, "10m"), (5.0, "5m"), (3.0, "3m"), (1.0, "1m")):
                         reach_rate = float(
                             sum(1.0 if d <= threshold_m else 0.0 for d in episode_rewards_summary["min_relative_dist"])
                         ) / float(len(episode_rewards_summary["min_relative_dist"]))
+                        reach_rates[threshold_tag] = reach_rate
                         writer.add_scalar(f"metrics/reach_rate_{threshold_tag}", reach_rate, global_step)
                     if curriculum_controller is not None:
                         threshold_m = float(curriculum_controller.current_threshold)
@@ -1425,17 +1633,46 @@ if __name__ == "__main__":
                     wandb_episode_log[f"metrics/reward_contrib_ratio/{component_name}"] = float(
                         abs(avg_contrib_component_returns[component]) / contrib_abs_sum
                     )
-                if episode_rewards_summary["min_relative_dist"]:
-                    for threshold_m, threshold_tag in ((10.0, "10m"), (5.0, "5m"), (3.0, "3m"), (1.0, "1m")):
-                        reach_rate = float(
-                            sum(1.0 if d <= threshold_m else 0.0 for d in episode_rewards_summary["min_relative_dist"])
-                        ) / float(len(episode_rewards_summary["min_relative_dist"]))
+                if reach_rates:
+                    for threshold_tag, reach_rate in reach_rates.items():
                         wandb_episode_log[f"metrics/reach_rate_{threshold_tag}"] = reach_rate
                     if current_threshold_reach_rate is not None:
                         wandb_episode_log["metrics/reach_rate_current_threshold"] = current_threshold_reach_rate
                 if avg_len is not None and args.gamma > 0.0:
                     wandb_episode_log["diagnostics/gamma_to_avg_len"] = gamma_to_avg_len
                 wandb_log(wandb_episode_log, global_step, commit=False)
+
+                policy_pool_episode_metrics = {
+                    "finished_episodes": int(episode_rewards_summary["count"]),
+                    "success_rate": succ_rate,
+                    "avg_return": avg_return,
+                    "avg_final_relative_dist": avg_final_dist,
+                    "avg_final_forward_alignment": avg_final_forward_alignment,
+                    "avg_min_relative_dist": avg_min_dist,
+                    "avg_episode_length": avg_len,
+                    "avg_episode_mean_closing_speed": avg_speed,
+                    "avg_approach_fraction": avg_approach_fraction,
+                    "avg_episode_min_hazard_clearance": avg_min_hazard_clearance,
+                    "done_counts": {
+                        "timeout": int(episode_rewards_summary["done_timeout"]),
+                        "collision": int(episode_rewards_summary["done_collision"]),
+                        "success": int(episode_rewards_summary["done_success"]),
+                        "far": int(episode_rewards_summary["done_far"]),
+                    },
+                    "done_rates": {
+                        "timeout": float(episode_rewards_summary["done_timeout"] / done_total),
+                        "collision": float(episode_rewards_summary["done_collision"] / done_total),
+                        "success": float(episode_rewards_summary["done_success"] / done_total),
+                        "far": float(episode_rewards_summary["done_far"] / done_total),
+                    },
+                    "reach_rates": reach_rates,
+                    "reach_rate_current_threshold": current_threshold_reach_rate,
+                    "raw_reward_components": avg_raw_component_returns,
+                    "reward_contrib": {
+                        key.replace("contrib_", "", 1): value
+                        for key, value in avg_contrib_component_returns.items()
+                    },
+                }
 
                 writer.flush()
 
@@ -1456,6 +1693,7 @@ if __name__ == "__main__":
                         float(avg_min_dist),
                         float(avg_len),
                     )
+                policy_pool_score = score
                 last_update_score = score
 
                 # Curriculum transition check
@@ -1473,6 +1711,7 @@ if __name__ == "__main__":
                         current_ent_coef=current_ent_coef,
                     )
                     if transition is not None:
+                        policy_pool_curriculum_transition = transition
                         print(
                             f"\n{'='*60}\n"
                             f"CURRICULUM TRANSITION\n"
@@ -1837,6 +2076,41 @@ if __name__ == "__main__":
                 latest_checkpoint["curriculum"] = curriculum_controller.get_state_dict()
             torch.save(latest_checkpoint, latest_path)
 
+            if should_save_policy_pool_checkpoint(
+                args, update, start_update, policy_pool_curriculum_transition
+            ):
+                policy_pool_checkpoint_path = os.path.join(
+                    policy_pool_dir,
+                    f"ppo_upd_{update:06d}_step_{global_step:010d}.pth",
+                )
+                policy_pool_reasons = policy_pool_save_reason(
+                    args, update, start_update, policy_pool_curriculum_transition
+                )
+                policy_pool_metadata = build_policy_pool_metadata(
+                    args=args,
+                    run_name=run_name,
+                    run_dir=run_dir,
+                    checkpoint_path=policy_pool_checkpoint_path,
+                    global_step=global_step,
+                    update=update,
+                    start_update=start_update,
+                    score=policy_pool_score,
+                    episode_metrics=policy_pool_episode_metrics,
+                    update_metrics=wandb_update_log,
+                    curriculum_controller=curriculum_controller,
+                    curriculum_transition=policy_pool_curriculum_transition,
+                    reasons=policy_pool_reasons,
+                )
+                policy_pool_checkpoint = dict(latest_checkpoint)
+                policy_pool_checkpoint["policy_pool_metadata"] = policy_pool_metadata
+                torch.save(policy_pool_checkpoint, policy_pool_checkpoint_path)
+                append_jsonl(policy_pool_manifest_path, policy_pool_metadata)
+                writer.add_scalar("policy_pool/saved_update", float(update), global_step)
+                print(
+                    f"Policy pool checkpoint saved: {policy_pool_checkpoint_path} "
+                    f"| reasons={','.join(policy_pool_reasons)}"
+                )
+
             if args.early_stop:
                 # When curriculum is active, only apply early stop on the final stage
                 if curriculum_controller is not None and not curriculum_controller.is_on_final_stage():
@@ -1894,6 +2168,11 @@ if __name__ == "__main__":
 
         # `--play` 复用 checkpoint 所在目录保存回测产物，不创建新的 run 目录。
         ckpt_dir = os.path.dirname(os.path.abspath(args.checkpoint)) if args.checkpoint else os.getcwd()
+        play_output_stem = (
+            f"play_trajectory_{args.target_asset_type}"
+            if args.target_asset_type is not None
+            else "play_trajectory"
+        )
 
         def _extract_positions(env, env_idx):
             attacker_pos = env.robot_state[env_idx, 0:3].detach().cpu().numpy()
@@ -2233,7 +2512,7 @@ if __name__ == "__main__":
         fig.suptitle(f"Play PPO Guidance | steps={len(t)} ({st_done}), final d={final_d:.2f} m, min d={min_d:.2f} m")
         fig.tight_layout(rect=[0, 0.03, 1, 0.95])
 
-        out_png = os.path.join(ckpt_dir, "play_trajectory.png")
+        out_png = os.path.join(ckpt_dir, f"{play_output_stem}.png")
         fig.savefig(out_png, dpi=150)
         plt.close(fig)
 
@@ -2255,12 +2534,13 @@ if __name__ == "__main__":
         ax3d.legend()
         _set_axes_equal(ax3d, room_bounds)
 
-        out_png3d = os.path.join(ckpt_dir, "play_trajectory_3d.png")
+        out_png3d = os.path.join(ckpt_dir, f"{play_output_stem}_3d.png")
         fig3d.savefig(out_png3d, dpi=150)
         plt.close(fig3d)
 
         np.savez(
-            os.path.join(ckpt_dir, "play_trajectory.npz"),
+            os.path.join(ckpt_dir, f"{play_output_stem}.npz"),
+            target_asset_type=np.array(args.target_asset_type or "", dtype="U32"),
             t=t,
             a1_x=attacker_xyz[:, 0], a1_y=attacker_xyz[:, 1], a1_z=attacker_xyz[:, 2],
             a1_qx=attacker_quat[:, 0], a1_qy=attacker_quat[:, 1],

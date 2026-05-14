@@ -55,6 +55,7 @@ class PursuitGuidanceTask(BaseTask):
         self.target_force_tensor = self.obs_dict["obstacle_force_tensor"]
         self.target_torque_tensor = self.obs_dict["obstacle_torque_tensor"]
         self.dt = float(self.obs_dict["dt"])
+        self.target_controller_mass = self._resolve_target_controller_mass()
 
         self.actions = torch.zeros(
             (self.num_envs, self.task_config.action_space_dim),
@@ -93,6 +94,7 @@ class PursuitGuidanceTask(BaseTask):
             "elliptical": 2,
             "apf_escape": 3,
         }
+
         self.target_motion_type = str(self.task_config.target_motion.type).lower()
         valid_motion_types = set(self.motion_name_to_id.keys()) | {"random"}
         if self.target_motion_type not in valid_motion_types:
@@ -216,6 +218,23 @@ class PursuitGuidanceTask(BaseTask):
             shape=(self.task_config.action_space_dim,),
             dtype=np.float32,
         )
+
+    def _resolve_target_controller_mass(self):
+        include_asset_type = self.sim_env.cfg.env_config.include_asset_type
+        asset_type_to_dict_map = self.sim_env.cfg.env_config.asset_type_to_dict_map
+        target_asset_configs = [
+            asset_config
+            for asset_type, asset_config in asset_type_to_dict_map.items()
+            if asset_type.startswith("target_") and include_asset_type.get(asset_type, True)
+        ]
+        if not target_asset_configs:
+            raise RuntimeError("Pursuit task requires one enabled target_* asset.")
+        if len(target_asset_configs) > 1:
+            raise RuntimeError(
+                "Pursuit task expects exactly one enabled target_* asset when using target controller."
+            )
+        target_mass = float(getattr(target_asset_configs[0], "controller_mass"))
+        return torch.full((self.num_envs,), target_mass, dtype=torch.float32, device=self.device)
 
     def close(self):
         if hasattr(self.sim_env, "delete_env"):
@@ -848,7 +867,7 @@ class PursuitGuidanceTask(BaseTask):
         self.target_force_tensor[:] = 0.0
         self.target_torque_tensor[:] = 0.0
         gravity_norm = torch.norm(self.obs_dict["gravity"], dim=1)
-        target_weight = self.obs_dict["robot_mass"] * gravity_norm
+        target_weight = self.target_controller_mass * gravity_norm
         self.target_force_tensor[:, 0, 2] = torch.clamp(
             target_weight * thrust_normalized, min=0.0
         )

@@ -5,6 +5,7 @@ from aerial_gym.config.robot_config.base_random_config import BaseRandCfg
 from aerial_gym.config.robot_config.base_rov_config import BaseROVCfg
 from aerial_gym.config.robot_config.base_quad_root_link_control_config import (
     BaseQuadRootLinkControlCfg,
+    BaseQuadRootLinkControlWithLidarCfg,
 )
 from aerial_gym.config.robot_config.pursuit_quad_direct_config import PursuitQuadDirectCfg
 
@@ -39,6 +40,7 @@ robot_registry.register("pursuit_quad_direct", PursuitQuadDirect, PursuitQuadDir
 robot_registry.register("base_octarotor", BaseMultirotor, BaseOctarotorCfg)
 robot_registry.register("base_random", BaseMultirotor, BaseRandCfg)
 robot_registry.register("base_quad_root_link_control", BaseMultirotor, BaseQuadRootLinkControlCfg)
+robot_registry.register("base_quad_root_link_control_with_lidar", BaseMultirotor, BaseQuadRootLinkControlWithLidarCfg)
 robot_registry.register("morphy_stiff", BaseMultirotor, MorphyStiffCfg)
 robot_registry.register("morphy", Morphy, MorphyCfg)
 robot_registry.register("morphy_fixed_base", Morphy, MorphyFixedBaseCfg)

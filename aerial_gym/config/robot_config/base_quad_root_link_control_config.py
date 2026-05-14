@@ -2,13 +2,12 @@ import numpy as np
 
 from aerial_gym import AERIAL_GYM_DIRECTORY
 
-from aerial_gym.config.sensor_config.camera_config.base_depth_camera_config import (
-    BaseDepthCameraConfig,
-)
 from aerial_gym.config.sensor_config.lidar_config.base_lidar_config import (
     BaseLidarConfig,
 )
-from aerial_gym.config.sensor_config.lidar_config.osdome_64_config import OSDome_64_Config
+from aerial_gym.config.sensor_config.lidar_config.pursuit_forward_lidar_config import (
+    PursuitForwardM3_120x25_UltraHighResLidarConfig,
+)
 from aerial_gym.config.sensor_config.imu_config.base_imu_config import BaseImuConfig
 
 from aerial_gym.config.robot_config.base_quad_config import BaseQuadCfg
@@ -53,3 +52,10 @@ class BaseQuadRootLinkControlCfg(BaseQuadCfg):
             use_discrete_approximation = (
                 True  # Setting to false will compute f' based on difference and time constant
             )
+
+
+class BaseQuadRootLinkControlWithLidarCfg(BaseQuadRootLinkControlCfg):
+    class sensor_config(BaseQuadRootLinkControlCfg.sensor_config):
+        enable_camera = False
+        enable_lidar = True
+        lidar_config = PursuitForwardM3_120x25_UltraHighResLidarConfig

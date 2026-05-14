@@ -39,6 +39,7 @@ class target_quad_asset_params:
     num_assets = 1
     asset_folder = f"{AERIAL_GYM_DIRECTORY}/resources/robots/quad"
     file = "model.urdf"
+    controller_mass = 1.94
     min_state_ratio = [
         0.75759143,
         0.75759143,
@@ -83,6 +84,11 @@ class target_quad_asset_params:
     convex_decomposition_from_submeshes = True
     vhacd_enabled = False
 
+
+class target_x500_asset_params(target_quad_asset_params):
+    asset_folder = f"{AERIAL_GYM_DIRECTORY}/resources/robots/x500"
+    file = "model.urdf"
+    controller_mass = 1.656
 
 class room_floor_asset_params(_FixedAssetBase):
     file = "pursuit_room_floor_ceiling.urdf"

@@ -8,6 +8,7 @@ from aerial_gym.config.asset_config.pursuit_guidance_asset_config import (
     static_cylinder_0_asset_params,
     static_cylinder_1_asset_params,
     target_quad_asset_params,
+    target_x500_asset_params,
 )
 
 
@@ -45,6 +46,7 @@ class PursuitGuidanceEnvCfg:
             "static_cylinder_0": True,
             "static_cylinder_1": True,
             "target_quad": True,
+            "target_x500": False,
         }
         asset_type_to_dict_map = {
             "room_floor": room_floor_asset_params,
@@ -56,4 +58,5 @@ class PursuitGuidanceEnvCfg:
             "static_cylinder_0": static_cylinder_0_asset_params,
             "static_cylinder_1": static_cylinder_1_asset_params,
             "target_quad": target_quad_asset_params,
+            "target_x500": target_x500_asset_params,
         }
