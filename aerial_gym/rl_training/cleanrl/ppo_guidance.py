@@ -91,33 +91,6 @@ def resolve_output_action_command_names(controller_name: str):
     return tuple(f"cmd_{idx}" for idx in range(4))
 
 
-def cli_arg_provided(argv, option_name):
-    return any(token == option_name or token.startswith(f"{option_name}=") for token in argv)
-
-
-def apply_curriculum_config_defaults(args, task_config, argv):
-    curriculum_cfg = getattr(task_config, "curriculum", None)
-    if curriculum_cfg is None:
-        return args
-
-    if not cli_arg_provided(argv, "--curriculum") and not cli_arg_provided(argv, "--no-curriculum"):
-        args.curriculum = bool(getattr(curriculum_cfg, "enabled", args.curriculum))
-
-    config_to_arg = (
-        ("thresholds", "curriculum_thresholds", "--curriculum-thresholds"),
-        ("stage_step_budgets", "curriculum_stage_step_budgets", "--curriculum-stage-step-budgets"),
-    )
-    for config_name, arg_name, option_name in config_to_arg:
-        if cli_arg_provided(argv, option_name) or not hasattr(curriculum_cfg, config_name):
-            continue
-        value = getattr(curriculum_cfg, config_name)
-        if config_name == "thresholds":
-            value = list(value)
-        setattr(args, arg_name, value)
-
-    return args
-
-
 def configure_target_asset_type(task_config, target_asset_type: Optional[str]):
     if target_asset_type is None:
         return None
@@ -284,12 +257,11 @@ def curriculum_metadata(curriculum_controller):
     state = curriculum_controller.get_state_dict()
     return {
         "stage_idx": int(state["stage_idx"]),
-        "current_threshold": float(state["current_threshold"]),
-        "stage_start_step": int(state["stage_start_step"]),
-        "stage_start_update": int(state["stage_start_update"]),
-        "thresholds": [float(v) for v in state.get("thresholds", [])],
-        "stage_step_budgets": [int(v) for v in state.get("stage_step_budgets", [])],
-        "stage_history": state.get("stage_history", []),
+        "current_threshold": float(curriculum_controller.current_threshold),
+        "stage_success_streak": int(state["stage_success_streak"]),
+        "visibility_reward_weight_scale": float(
+            curriculum_controller.visibility_reward_weight_scale
+        ),
     }
 
 
@@ -367,11 +339,12 @@ def build_policy_pool_metadata(
             "ent_coef_final": float(args.ent_coef_final),
             "gamma": float(args.gamma),
             "gae_lambda": float(args.gae_lambda),
-            "curriculum_enabled": bool(getattr(args, "curriculum", False)),
-            "curriculum_thresholds": [float(v) for v in getattr(args, "curriculum_thresholds", [])],
-            "curriculum_stage_step_budgets": [
-                int(v) for v in getattr(args, "curriculum_stage_step_budgets", [])
-            ],
+            "curriculum_enabled": bool(args.curriculum),
+            "curriculum_stable_success_rate": float(args.curriculum_stable_success_rate),
+            "curriculum_stable_success_updates": int(args.curriculum_stable_success_updates),
+            "curriculum_stable_success_min_episodes": int(
+                args.curriculum_stable_success_min_episodes
+            ),
         },
     }
 
@@ -501,7 +474,7 @@ def get_args():
         {"name": "--wandb-mode", "type": str, "default": "online", "help": "WandB mode: online, offline, or disabled."},
 
         # Algorithm specific arguments
-        {"name": "--total-timesteps", "type":int, "default": 1200000000,
+        {"name": "--total-timesteps", "type":int, "default": 2400000000,
             "help": "total timesteps of the experiments"},
         {"name": "--learning-rate", "type":float, "default": 0.0003, # 降低学习率以适应稳定的reward范围
             "help": "the learning rate of the optimizer"},
@@ -557,9 +530,9 @@ def get_args():
         {"name": "--early-stop-min-episodes", "type": int, "default": 64, "help": "单个update至少统计到多少个结束episode才参与best/early-stop判断"},
         # Curriculum learning
         {"name": "--curriculum", "action": "store_true", "default": False, "help": "Enable automatic multi-stage curriculum learning"},
-        {"name": "--no-curriculum", "action": "store_true", "default": False, "help": "Disable curriculum learning"},
-        {"name": "--curriculum-thresholds", "type": float, "nargs": "+", "default": [5.0, 3.0, 1.0], "help": "Success distance thresholds per curriculum stage (meters)"},
-        {"name": "--curriculum-stage-step-budgets", "type": int, "nargs": "+", "default": [400000000, 400000000], "help": "Global-step budgets for every non-final curriculum stage"},
+        {"name": "--curriculum-stable-success-rate", "type": float, "default": 0.98, "help": "Success-rate threshold for success_stability curriculum transitions"},
+        {"name": "--curriculum-stable-success-updates", "type": int, "default": 100, "help": "Consecutive PPO updates above the success-rate threshold before a curriculum transition"},
+        {"name": "--curriculum-stable-success-min-episodes", "type": int, "default": 64, "help": "Minimum finished episodes in an update before it can count toward curriculum success stability"},
         ]
 
     # parse arguments
@@ -583,12 +556,12 @@ def get_args():
         args.track = True  # 默认启用WandB
 
     # 统一处理best保存开关：默认启用，除非显式传入 --no-save-best
-    if hasattr(args, "no_save_best") and args.no_save_best:
+    if args.no_save_best:
         args.save_best = False
     else:
         args.save_best = True
 
-    if hasattr(args, "no_save_policy_pool") and args.no_save_policy_pool:
+    if args.no_save_policy_pool:
         args.save_policy_pool = False
     else:
         args.save_policy_pool = True
@@ -596,15 +569,10 @@ def get_args():
         raise ValueError("--policy-pool-save-interval-updates must be >= 0")
     args.policy_pool_dir_name = str(args.policy_pool_dir_name).strip() or "policy_pool"
 
-    if hasattr(args, "no_early_stop") and args.no_early_stop:
+    if args.no_early_stop:
         args.early_stop = False
     else:
         args.early_stop = True
-
-    if hasattr(args, "no_curriculum") and args.no_curriculum:
-        args.curriculum = False
-    else:
-        args.curriculum = getattr(args, "curriculum", False)
 
     # name allignment
     args.sim_device_id = args.compute_device_id
@@ -631,6 +599,7 @@ class RecordEpisodeStatisticsTorch:
             "effort",
             "collision_penalty",
             "avoid_penalty",
+            "visibility_loss_penalty",
             "contrib_progress",
             "contrib_success_bonus",
             "contrib_time_penalty",
@@ -639,6 +608,7 @@ class RecordEpisodeStatisticsTorch:
             "contrib_collision_penalty",
             "contrib_avoid_penalty",
             "contrib_alignment",
+            "contrib_visibility",
         ]
 
     def __getattr__(self, name):
@@ -773,6 +743,17 @@ class RecordEpisodeStatisticsTorch:
             infos["r_approach_fraction"] = self.returned_approach_fraction
         if "min_hazard_clearance" in reward_info:
             infos["r_episode_min_hazard_clearance"] = self.returned_episode_min_hazard_clearance
+        if "target_detectable" in reward_info:
+            infos["r_final_target_detectable"] = reward_info["target_detectable"].float()
+        for key in (
+            "visibility_loss_steps",
+            "visibility_episode_invisible_steps",
+            "visibility_episode_loss_segments",
+            "visibility_episode_recovered_segments",
+            "visibility_episode_max_loss_steps",
+        ):
+            if key in reward_info:
+                infos[f"r_{key}"] = reward_info[key].float()
         return (
             observations,
             rewards,
@@ -911,7 +892,6 @@ class Agent(nn.Module):
 
     
 if __name__ == "__main__":
-    launch_argv = sys.argv[1:]
     args = get_args()
     if args.resume and args.play:
         raise ValueError("--resume cannot be used together with --play.")
@@ -957,7 +937,6 @@ if __name__ == "__main__":
         wandb_run_id = loaded_checkpoint.get("wandb_run_id")
 
     base_task_config = task_registry.get_task_config(args.task)
-    apply_curriculum_config_defaults(args, base_task_config, launch_argv)
     target_asset_metadata = configure_target_asset_type(
         base_task_config, args.target_asset_type
     )
@@ -1044,8 +1023,11 @@ if __name__ == "__main__":
             )
             print(
                 f"Curriculum: {'ENABLED' if args.curriculum else 'DISABLED'} "
-                f"| thresholds={args.curriculum_thresholds} "
-                f"| stage_step_budgets={args.curriculum_stage_step_budgets}"
+                f"| stages=5m,3m,3m+vis0.20,3m+vis0.40,3m+vis0.60 "
+                f"| transition=success_stability "
+                f"| stable_sr={args.curriculum_stable_success_rate} "
+                f"x{args.curriculum_stable_success_updates} "
+                f"| min_episodes={args.curriculum_stable_success_min_episodes}"
             )
     else:
         if args.track:
@@ -1174,15 +1156,16 @@ if __name__ == "__main__":
             curriculum_controller = CurriculumController(
                 task_config=env_cfg,
                 args=args,
-                checkpoint_fn=build_training_checkpoint,
             )
-            if args.resume and loaded_checkpoint is not None and "curriculum" in loaded_checkpoint:
+            if args.resume and loaded_checkpoint is not None:
+                if "curriculum" not in loaded_checkpoint:
+                    raise ValueError(
+                        "--resume --curriculum requires a checkpoint with curriculum state."
+                    )
                 curriculum_controller.load_state_dict(loaded_checkpoint["curriculum"])
-                env_cfg.reward.success_threshold = curriculum_controller.current_threshold
                 print(
                     f"Resumed curriculum: stage {curriculum_controller.stage_idx}, "
-                    f"threshold {curriculum_controller.current_threshold:.1f}m, "
-                    f"started at update {curriculum_controller.stage_start_update}"
+                    f"threshold {curriculum_controller.current_threshold:.1f}m"
                 )
 
         last_update_score = None
@@ -1247,6 +1230,12 @@ if __name__ == "__main__":
                 "episode_mean_closing_speed": [],
                 "approach_fraction": [],
                 "episode_min_hazard_clearance": [],
+                "final_target_detectable": [],
+                "visibility_loss_steps": [],
+                "visibility_episode_invisible_steps": [],
+                "visibility_episode_loss_segments": [],
+                "visibility_episode_recovered_segments": [],
+                "visibility_episode_max_loss_steps": [],
                 "done_timeout": 0,
                 "done_collision": 0,
                 "done_success": 0,
@@ -1414,6 +1403,30 @@ if __name__ == "__main__":
                                     "episode_metrics/episode_min_hazard_clearance",
                                     "episode_min_hazard_clearance",
                                 ),
+                                "r_final_target_detectable": (
+                                    "episode_metrics/final_target_detectable",
+                                    "final_target_detectable",
+                                ),
+                                "r_visibility_loss_steps": (
+                                    "episode_metrics/visibility_loss_steps",
+                                    "visibility_loss_steps",
+                                ),
+                                "r_visibility_episode_invisible_steps": (
+                                    "episode_metrics/visibility_episode_invisible_steps",
+                                    "visibility_episode_invisible_steps",
+                                ),
+                                "r_visibility_episode_loss_segments": (
+                                    "episode_metrics/visibility_episode_loss_segments",
+                                    "visibility_episode_loss_segments",
+                                ),
+                                "r_visibility_episode_recovered_segments": (
+                                    "episode_metrics/visibility_episode_recovered_segments",
+                                    "visibility_episode_recovered_segments",
+                                ),
+                                "r_visibility_episode_max_loss_steps": (
+                                    "episode_metrics/visibility_episode_max_loss_steps",
+                                    "visibility_episode_max_loss_steps",
+                                ),
                             }
 
                             for key, (tb_tag, summary_key) in episode_metric_map.items():
@@ -1486,6 +1499,27 @@ if __name__ == "__main__":
                 if episode_rewards_summary["lengths"]:
                     avg_len = sum(episode_rewards_summary["lengths"]) / len(episode_rewards_summary["lengths"])
                     summary_items.append(f"avg_len: {avg_len:.1f} steps")
+                avg_visibility_metrics = {}
+                for key in (
+                    "final_target_detectable",
+                    "visibility_loss_steps",
+                    "visibility_episode_invisible_steps",
+                    "visibility_episode_loss_segments",
+                    "visibility_episode_recovered_segments",
+                    "visibility_episode_max_loss_steps",
+                ):
+                    metric_values = episode_rewards_summary[key]
+                    avg_visibility_metrics[key] = (
+                        sum(metric_values) / len(metric_values) if metric_values else None
+                    )
+                if avg_visibility_metrics["final_target_detectable"] is not None:
+                    summary_items.append(
+                        f"final_visible: {avg_visibility_metrics['final_target_detectable']:.1%}"
+                    )
+                if avg_visibility_metrics["visibility_episode_max_loss_steps"] is not None:
+                    summary_items.append(
+                        f"vis_max_loss: {avg_visibility_metrics['visibility_episode_max_loss_steps']:.1f} steps"
+                    )
 
                 if summary_items:
                     print(f"   平均奖励: {' | '.join(summary_items)}")
@@ -1541,6 +1575,9 @@ if __name__ == "__main__":
                     writer.add_scalar("metrics/avg_approach_fraction", avg_approach_fraction, global_step)
                 if avg_min_hazard_clearance is not None:
                     writer.add_scalar("metrics/avg_episode_min_hazard_clearance", avg_min_hazard_clearance, global_step)
+                for key, value in avg_visibility_metrics.items():
+                    if value is not None:
+                        writer.add_scalar(f"metrics/{key}", value, global_step)
                 writer.add_scalar("metrics/done_timeout_count", episode_rewards_summary["done_timeout"], global_step)
                 writer.add_scalar("metrics/done_collision_count", episode_rewards_summary["done_collision"], global_step)
                 writer.add_scalar("metrics/done_success_count", episode_rewards_summary["done_success"], global_step)
@@ -1618,6 +1655,12 @@ if __name__ == "__main__":
                     "metrics/avg_episode_min_hazard_clearance": avg_min_hazard_clearance,
                     "metrics/success_rate": succ_rate,
                 }
+                optional_episode_values.update(
+                    {
+                        f"metrics/{key}": value
+                        for key, value in avg_visibility_metrics.items()
+                    }
+                )
                 wandb_episode_log.update(
                     {key: float(value) for key, value in optional_episode_values.items() if value is not None}
                 )
@@ -1653,6 +1696,7 @@ if __name__ == "__main__":
                     "avg_episode_mean_closing_speed": avg_speed,
                     "avg_approach_fraction": avg_approach_fraction,
                     "avg_episode_min_hazard_clearance": avg_min_hazard_clearance,
+                    "visibility_metrics": avg_visibility_metrics,
                     "done_counts": {
                         "timeout": int(episode_rewards_summary["done_timeout"]),
                         "collision": int(episode_rewards_summary["done_collision"]),
@@ -1699,16 +1743,8 @@ if __name__ == "__main__":
                 # Curriculum transition check
                 if curriculum_controller is not None:
                     transition = curriculum_controller.update(
-                        global_step=global_step,
-                        update=update,
                         succ_rate=succ_rate,
                         episode_rewards_summary=episode_rewards_summary,
-                        agent=agent,
-                        optimizer=optimizer,
-                        run_dir=run_dir,
-                        run_name=run_name,
-                        wandb_run_id=wandb_run_id,
-                        current_ent_coef=current_ent_coef,
                     )
                     if transition is not None:
                         policy_pool_curriculum_transition = transition
@@ -1717,15 +1753,18 @@ if __name__ == "__main__":
                             f"CURRICULUM TRANSITION\n"
                             f"  Stage {transition['stage_idx']-1} -> Stage {transition['stage_idx']}\n"
                             f"  Threshold: {transition['old_threshold']:.1f}m -> {transition['new_threshold']:.1f}m\n"
-                            f"  Type: {transition['transition_info']['type']}\n"
-                            f"  Reason: {transition['transition_info']['reason']}\n"
-                            f"  Stage checkpoint: {transition['stage_ckpt_path']}\n"
+                            f"  Visibility weight scale: {transition['old_visibility_reward_weight_scale']:.3f} -> "
+                            f"{transition['new_visibility_reward_weight_scale']:.3f}\n"
+                            f"  Success gate: sr={transition['succ_rate']:.3f} "
+                            f"| episodes={transition['finished_episodes']} "
+                            f"| required={transition['stable_success_rate']:.3f}"
+                            f"x{transition['stable_success_updates']}\n"
                             f"{'='*60}\n"
                         )
                         no_improve_updates = 0
                     # Log curriculum metrics
                     curriculum_controller.log_curriculum_metrics(
-                        writer, global_step, update, succ_rate
+                        writer, global_step
                     )
 
             # bootstrap value if not done

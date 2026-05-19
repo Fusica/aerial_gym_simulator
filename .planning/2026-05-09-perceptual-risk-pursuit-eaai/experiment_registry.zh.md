@@ -76,7 +76,7 @@
    - 一旦探索消失，策略永远无法重新发现通往成功的路径
 
 **对计划的意义：**
-- B0 上界在当前奖励结构下无法学习成功 → 在启动 B0-B5 比较前必须重构奖励
+- 历史初步判断曾认为 B0 上界在当前奖励结构下无法学习成功；该判断已被后续 E0-C2/E0-C3 修正，当前计划以默认控制器 + 自动课程学习建立 B0 上界。
 - 学习改进的对数线性衰减预测到达0.5m需要16.5亿步，但进展正在超指数衰减
 - e1参数的宽限制导致更严重的探索崩溃和梯度消失 → 见E0-C2对比
 
@@ -148,19 +148,15 @@
 - **状态：** pending
 - **尚无实验运行**
 
-### E4：Oracle 上界测试
+### E4：全状态参考
 - **状态：** pending
 - **尚无实验运行**
 
-### E5：全状态参考
+### E5：Horizon/FOV 敏感性
 - **状态：** pending
 - **尚无实验运行**
 
-### E6：Horizon/FOV 敏感性
-- **状态：** pending
-- **尚无实验运行**
-
-### E7：场景泛化
+### E6：场景泛化
 - **状态：** pending
 - **尚无实验运行**
 
@@ -185,11 +181,33 @@
 
 ## Baseline 对照表
 
-| Baseline ID | 描述 | 观测条件 | 风险信号 | 动作修正 |
+| Baseline ID | 描述 | 观测条件 | 风险信号 | PPO 融合方式 |
 |------------|------|---------|---------|---------|
 | B0 | Full-State PPO | 原始 32D | 无 | 无 |
 | B1 | Reduced-State PPO | 降信息 | 无 | 无 |
 | B2 | Reduced-State + Heuristic Risk | 降信息 | 启发式 | 无 |
 | B3 | Reduced-State + Learned State Risk | 降信息 | 学习型 `p_lost(s_red)` | 无 |
-| B4 | Reduced-State + Oracle Risk | 降信息 | Oracle | 无 |
-| B5 | Reduced-State + Action-Conditioned Risk Correction | 降信息 | 学习型 `R_obs(s_red, u)` | CTBR 约束投影 |
+| B4 | Reduced-State + Risk-Modulated PPO | 降信息 | 学习型 `R_obs(s_red, u)` | 动作分布/优势估计调制（暂定） |
+
+## B4 内部消融注册（Deep-Research Refresh 后新增）
+
+| 消融 ID | 描述 | 目的 | 状态 |
+|---------|------|------|------|
+| B4-A0 | Risk concat only | 排除“只是把风险拼进观测”的解释 | planned |
+| B4-A1 | `R_obs(s_red,u)` vs `p_lost(s_red)` | 验证动作条件性是否带来增益 | planned |
+| B4-A2 | Shuffled-action risk | 验证风险-动作配对是否真实有因果信息 | planned |
+| B4-A3 | Risk-conditioned advantage / cost-advantage | 对比 PPO 内部 loss 调制是否有效 | planned |
+| B4-A4 | Actor latent/mean/variance modulation | 对比 actor 侧调制位置 | planned |
+| B4-A5 | PPO-Lagrangian using same risk as cost | 排除“只是 safe PPO/CPO 变体”的解释 | planned |
+| B4-A6 | Shield/filter using same risk post-hoc | 排除“只是动作过滤/投影”的解释 | planned |
+| B4-A7 | Privileged critic baseline | 排除“只是 asymmetric actor-critic/privileged learning”的解释 | planned |
+
+## LiDAR 稀疏返回工程验证注册（新增）
+
+| 验证 ID | 描述 | 目的 | 状态 |
+|---------|------|------|------|
+| S0 | 50/100/150/200m target return count 和 occupancy 分布 | 证明传感器输入条件被量化 | planned |
+| S1 | dropout / longest invisible streak / visibility duty cycle | 量化可观测性风险数据基础 | planned |
+| S2 | angular resolution / range noise / latency / reflectivity sensitivity | 防止过度依赖单一 LiDAR profile | planned |
+| S3 | 0/1/2/5/10 target-return sparse-point ablation | 将 100-200m 写成 sparse-return stress test | planned |
+| S4 | matched-state candidate-action risk ranking | 验证 `R_obs(s_red,u)` 不是状态风险伪装 | planned |

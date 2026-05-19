@@ -1,0 +1,133 @@
+\documentclass[lettersize,journal]{IEEEtran}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amsfonts}
+\usepackage{cite}
+\usepackage{url}
+\usepackage{balance}
+
+\hyphenation{op-tical net-works semi-conduc-tor IEEE-Xplore}
+
+\begin{document}
+
+\title{Action-Conditioned Observability-Risk Modulated PPO for LiDAR-Reduced UAV Pursuit}
+
+\author{Anonymous Authors}
+
+\markboth{Draft Manuscript for Engineering Applications of Artificial Intelligence}{Anonymous Authors: Observability-Risk Modulated PPO}
+
+\maketitle
+
+\begin{abstract}
+  High-speed unmanned aerial vehicle pursuit is commonly studied with privileged relative states or simplified sensing assumptions, but onboard pursuit must make decisions from limited, noisy, and intermittently sparse sensor evidence. This paper studies LiDAR/range-image reduced-information pursuit, where the pursuer cannot use target ground truth, semantic masks, or simulator-only target identifiers at policy execution time. We formulate short-horizon target observability loss as a sensing-continuity risk, learn action-conditioned risk estimates from privileged rollouts, and use the resulting signal to modulate proximal policy optimization rather than applying a post-hoc action filter. The resulting framework is designed to separate the contribution of reduced sensing, state-only risk prediction, heuristic risk shaping, and action-conditioned observability-risk modulation through a staged baseline and ablation protocol. The paper defines the problem setting, literature position, method interface, and evaluation protocol while reserving numerical performance claims for completed experiments.
+\end{abstract}
+
+\begin{IEEEkeywords}
+  UAV pursuit, partial observability, LiDAR, observability risk, proximal policy optimization, safe reinforcement learning.
+\end{IEEEkeywords}
+
+\section{Introduction}
+
+% Plan: Motivate UAV pursuit as an autonomy problem where sensing continuity matters as much as capture geometry.
+\IEEEPARstart{U}{nmanned} aerial vehicle (UAV) pursuit-evasion is a core problem for autonomous airspace security, cooperative robotics, and adversarial motion planning. Recent reinforcement-learning and planning systems have improved UAV pursuit, interception, and multi-agent maneuvering in high-speed or unknown environments \cite{yang2025rlpereview,chen2025open,zhang2023gameofdrones,yan2024lsrctd3,roncero2025agilecontrollers,giral2026intercept}. However, many pursuit policies are still evaluated under privileged or heavily processed observations. In real onboard pursuit, the pursuer must decide not only how to reduce range, but also how to keep the target detectable through a limited sensor aperture during aggressive motion.
+
+% Plan: State the sensing gap using finite field of view, target loss, and sensor-compatible pursuit literature.
+Limited visual field, visibility-based pursuit-evasion, bearing-only pursuit, target tracking, and vision-based capture studies show that target loss and reacquisition are first-order components of robotic pursuit \cite{peng2025limitedvisual,wang2025viper,zhou2025visibilityocclusion,li2025bearingonly,mavcapturingmav2024,cao2019droneschasing,zhang2019coarsetofine,park2023lidardrone}. These works make clear that finite sensing cannot be treated as an implementation detail. A high-speed pursuer can choose an action that is locally good for closing distance while simultaneously pushing the target toward the edge of the detectable region, causing future observations to collapse. This motivates an explicit model of how candidate actions affect near-term target observability.
+
+% Plan: Position the method against safe RL and risk-gated control without overclaiming generic risk-aware PPO novelty.
+The proposed direction is also related to constrained and safe reinforcement learning, including constrained policy optimization, Lagrangian methods, recovery policies, shields, safety benchmarks, risk-sensitive policy gradients, and action-conditioned risk gating \cite{achiam2017cpo,stooke2020pidlag,thananjeyan2021recoveryrl,alshiekh2018shielding,safetygym2019,kim2024predictivecvar,liu2026actionriskgating}. These methods establish that risk-aware policy learning and action gating are not new in the general sense. The distinction pursued here is narrower: the constrained variable is not collision or generic safety violation, but target observability loss in a LiDAR/range-image reduced-information UAV pursuit task.
+
+% Plan: Summarize the proposed approach and keep the method claim within the settled plan.
+This paper studies an action-conditioned observability-risk modulated PPO framework. A full-state pursuit policy provides an upper reference and privileged rollouts provide labels for short-horizon target loss. The online policy, however, receives only ego state, previous action, and LiDAR/range-image features. A learned risk model estimates both state risk and action-conditioned risk, denoted by $p_{\mathrm{lost}}(s^{\mathrm{red}})$ and $R_{\mathrm{obs}}(s^{\mathrm{red}},u)$, where $s^{\mathrm{red}}$ is the reduced observation. The main policy remains a PPO controller that directly outputs collective-thrust and body-rate commands, while the learned risk signal is introduced inside policy learning rather than after the action has already been sampled.
+
+% Plan: List contributions without claiming completed numerical results.
+The paper is organized around three contributions:
+\begin{itemize}
+  \item a sensor-honest LiDAR/range-image reduced-information UAV pursuit formulation that excludes target truth, simulator semantic labels, and truth-derived bearing/range inputs at policy execution time;
+  \item a short-horizon observability-loss risk model trained from privileged rollouts, including an action-conditioned form $R_{\mathrm{obs}}(s^{\mathrm{red}},u)$ for ranking candidate actions by future target-loss risk;
+  \item a staged PPO evaluation protocol that separates full-state pursuit, reduced-information pursuit, heuristic risk, state-only learned risk, and action-conditioned observability-risk modulation.
+\end{itemize}
+
+\section{Related Work}
+
+\subsection{Finite-Sensing Pursuit and Target Reacquisition}
+
+% Plan: Compare against limited-FOV and visibility pursuit without claiming that limited perception itself is new.
+Limited-field pursuit has been studied through multi-UAV visual-field constraints, visibility-based pursuit-evasion, and occlusion-aware control formulations \cite{peng2025limitedvisual,wang2025viper,zhou2025visibilityocclusion}. These works directly motivate the target-loss and reacquisition part of our problem. The difference is that we do not model visibility only as a phase, reward, or control-barrier constraint. Instead, we learn a calibrated near-term observability-loss risk under reduced LiDAR/range-image evidence and use it as a structured input to policy learning.
+
+% Plan: Place sensor-compatible tracking and capture systems around the sensing assumption.
+Bearing-only pursuit, vision-based MAV capture, drone-chasing, and UAV target-tracking systems further show how difficult long-range or small-target pursuit becomes under onboard sensing \cite{li2025bearingonly,mavcapturingmav2024,cao2019droneschasing,zhang2019coarsetofine,park2023lidardrone}. These systems are important evidence that the sensing interface matters. Our setting differs by focusing on high-speed pursuit control under sparse range-image returns rather than on detector design, bounding-box refinement, or cooperative capture hardware.
+
+\subsection{UAV Pursuit-Evasion and Aerial Interception}
+
+% Plan: Summarize high-speed, online-planning, and real-dynamics UAV PE neighbors as domain pressure.
+Recent UAV pursuit-evasion studies include online planning in unknown environments, target-prediction-enhanced multi-UAV pursuit, high-speed maneuvering, agile quadrotor controllers, and reinforcement-learning-based aerial interception \cite{chen2025open,zhang2023gameofdrones,yan2024lsrctd3,roncero2025agilecontrollers,giral2026intercept,zhao2025msmar}. These works define a strong domain baseline: they address pursuit performance, planning, deployment realism, or high-speed maneuvering. Our focus is different. We do not claim a new multi-UAV online planner or a new agile flight controller; we isolate how reduced sensing and action-conditioned observability risk affect pursuit policy learning.
+
+% Plan: Delimit multi-agent and scalable pursuit work from this paper's single-method claim.
+Multi-agent and hierarchical pursuit-evasion methods improve cooperation, assignment, communication, scalability, and adversarial robustness \cite{shao2026peqmixer,zhao2024autonomousuavpe,luo2024improvedmadrl,tan2026scalablefixedwing,xiang2025cihrl,feroskhan2024multipursuitevasion}. They are essential related work, but the present paper does not treat multi-agent cooperation as the central contribution. The planned comparison uses these papers to delimit scope and to prevent overclaiming novelty in pursuit-evasion reinforcement learning itself \cite{yang2025rlpereview}.
+
+\subsection{Constrained and Risk-Sensitive Reinforcement Learning}
+
+% Plan: Establish constrained RL and safe RL as method ancestors.
+Constrained policy optimization, PID Lagrangian methods, Safety Gym, conservative adaptive penalties, distributional risk-sensitive actor-critic methods, and predictive CVaR policy gradients provide the general constrained and risk-sensitive RL background \cite{achiam2017cpo,stooke2020pidlag,safetygym2019,ma2022cap,ma2020dsac,kim2024predictivecvar}. Recovery RL and shielding further show that learned recovery zones or action shields can intervene when a task policy approaches unsafe states \cite{thananjeyan2021recoveryrl,alshiekh2018shielding}. Our method should therefore be compared against PPO-Lagrangian and shield/filter variants using the same observability-risk signal.
+
+% Plan: Explain the specific difference between collision/safety risk and observability-loss risk.
+Risk-aware pursuit and high-speed safety-shielded flight are closer to the robotic application domain \cite{grape2019riskaware,zhang2026safetyshieldedflight}. Action-conditioned risk gating under partial observability is a particularly close method-level neighbor \cite{liu2026actionriskgating}. We therefore avoid claiming general action-conditioned risk gating as new. The proposed contribution is to change the risk semantics to target observability loss, learn that risk from privileged pursuit rollouts, and inject it into PPO under sensor-honest LiDAR/range-image inputs.
+
+\subsection{PPO and Privileged Training under Partial Observability}
+
+% Plan: Put PPO and asymmetric training in the support role.
+PPO is used as the base policy optimizer because it is a reliable on-policy method for continuous-control policy learning \cite{schulman2017ppo}. Asymmetric actor-critic and asymmetric DQN methods show how privileged simulator information can improve learning while the deployed actor receives partial observations \cite{pinto2017aac,baisero2022adqn}. Recent informed asymmetric actor-critic work further studies which privileged signals are useful under partial observability \cite{ebi2026iaac}. In this paper, privileged information is used to label and supervise observability risk, not to provide target truth to the online actor.
+
+% Plan: Connect to EAAI-style UAV RL and reduced-measurement guidance without treating RL as novelty.
+Reduced-measurement interception, aerial-robot interception, and UAV autopilot studies demonstrate that EAAI-style contributions can combine reinforcement learning with flight-control engineering when the application assumption is explicit \cite{ren2025losrate,giral2026intercept,liu2026autopilot}. Imperfect-information multi-UAV reasoning further supports the relevance of partial information in aerial autonomy \cite{gao2026mentalstates}. The present paper follows this application-driven style: reinforcement learning is the training machinery, while the scientific claim is the action-conditioned observability-risk formulation for reduced-sensing pursuit.
+
+\section{Method}
+
+\subsection{Problem Setting}
+
+% Plan: Define the reduced observation and action interface that are already fixed by the plan.
+We consider a pursuer UAV that tracks and captures a target UAV in simulation. The full-state baseline observes privileged geometric variables, including target-relative state. The reduced-information policy observes only an ego-state component, the previous collective-thrust/body-rate action, and a stack of LiDAR/range-image features. We denote this reduced observation by $s_t^{\mathrm{red}}$. The policy outputs a normalized control command
+\begin{equation}
+  u_t = [c_t, p_t, q_t, r_t] \in [-1,1]^4,
+\end{equation}
+where $c_t$ is collective thrust and $p_t,q_t,r_t$ are body-rate commands.
+
+% Plan: Define observability loss in terms of future target detectability, without adding implementation details not yet fixed.
+Let $D_t$ denote whether the target is inside the pursuer's virtual detectable region at time $t$. A short-horizon observability-loss label is generated from privileged rollout metadata:
+\begin{equation}
+  y_t =
+  \mathbb{I}\left[
+    \exists \tau \in [t,t+H] \ \mathrm{s.t.}\
+    D_{\tau:\tau+K_{\mathrm{persist}}-1}=0
+    \right].
+\end{equation}
+The current experimental plan sets $H=150$ and $K_{\mathrm{persist}}=10$, with horizon sensitivity planned for $H \in \{100,150,200\}$.
+
+\subsection{Observability-Risk Modulated PPO}
+
+% Plan: State the settled method interface, while keeping the final modulation design open to ablation.
+The risk model estimates a state-only loss probability $p_{\mathrm{lost}}(s_t^{\mathrm{red}})$ and an action-conditioned score $R_{\mathrm{obs}}(s_t^{\mathrm{red}},u)$. The latter is intended to compare candidate actions at the same reduced observation. The PPO policy remains the executed controller; the environment should receive the same sampled action whose log probability enters the PPO ratio. Risk is therefore used as an internal learning signal for actor features, action-distribution parameters, critic/risk values, or advantage shaping, rather than as a post-hoc replacement of the sampled action.
+
+% Plan: Specify the causal baseline ladder without reporting results.
+The main comparison ladder is: B0 full-state PPO as an upper reference, B1 reduced PPO without risk, B2 reduced PPO with a LiDAR-honest heuristic risk, B3 reduced PPO with learned state risk, and B4 reduced PPO with learned action-conditioned observability-risk modulation. Internal B4 ablations include risk concatenation, shuffled-action risk, PPO-Lagrangian with the same risk as a cost, shield/filter variants, privileged critic, and separate actor- and advantage-side risk modulation.
+
+\section{Experimental Design}
+
+% Plan: Give the planned evaluation protocol only, since final results are not yet available.
+The evaluation protocol separates offline risk quality from online pursuit performance. Offline risk evaluation will report discrimination and calibration metrics such as AUROC, AUPRC, Brier score, expected calibration error, reliability diagrams, and matched-state action-risk ranking accuracy. Online evaluation will report success rate, time to capture, final target detectability, target-lost time, longest invisible streak, recovery count, recovery rate, control smoothness, action saturation, and visible-strike performance.
+
+% Plan: State sensor stress tests needed to support the reduced-information claim.
+Because the method relies on sparse LiDAR/range-image evidence, experiments will also report target return count, range-image occupancy, dropout statistics, and sensitivity to noise, latency, angular resolution, reflectivity, and target range. The current plan treats 100 m, 150 m, and 200 m as sparse-return stress-test regimes rather than as a real-world long-range deployment guarantee.
+
+\section{Conclusion}
+
+% Plan: Close with the paper's intended claim and avoid unrun result statements.
+This study frames high-speed UAV pursuit under reduced LiDAR/range-image sensing as an observability-risk-sensitive control problem. The intended contribution is not a generic safe PPO algorithm or a new pursuit-evasion benchmark, but a sensor-honest formulation in which privileged rollouts supervise action-conditioned target-loss risk and that risk modulates PPO learning. The staged B0--B4 protocol is designed to test whether action-conditioned observability risk adds value beyond full-state references, reduced-information PPO, heuristic risk, and state-only learned risk.
+
+\balance
+\bibliographystyle{plain}
+\bibliography{main}
+
+\end{document}

@@ -140,7 +140,7 @@ class task_config:
     class reward:
         eps = 1e-6
         weight_progress = 0.5
-        success_threshold = 1.0
+        success_threshold = 3.0
         success_forward_alignment_cos = 0.95
         base_success_bonus = 20.0
         early_bonus_scale = 10.0
@@ -149,6 +149,9 @@ class task_config:
         smooth_penalty_coef = -0.001
         amplitude_penalty_coef = -0.0001
         weight_alignment = 0.005
+        visibility_reward_weight_scale = 0.0
+        visibility_loss_persist_steps = 10
+        weight_visibility_loss_penalty = 0.05
         weight_success_bonus = 0.15
         weight_effort = 1.0
         weight_avoid = 0.15
@@ -162,8 +165,3 @@ class task_config:
         obstacle_hard_margin = 50.0
         avoid_margin = 60.0
         static_obstacle_radius = 300.0
-
-    class curriculum:
-        enabled = True
-        thresholds = [5.0, 3.0, 1.0]
-        stage_step_budgets = [400_000_000, 400_000_000]

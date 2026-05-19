@@ -45,8 +45,8 @@ class PursuitGuidanceEnvCfg:
             "room_bottom_wall": True,
             "static_cylinder_0": True,
             "static_cylinder_1": True,
-            "target_quad": True,
-            "target_x500": False,
+            "target_quad": False,
+            "target_x500": True,
         }
         asset_type_to_dict_map = {
             "room_floor": room_floor_asset_params,
