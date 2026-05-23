@@ -52,11 +52,17 @@
 ## 必需 Baseline 阶梯
 | ID | 方法 | 作用 |
 |----|------|------|
-| B0 | 原始 32D 全状态 PPO | 上界参考 |
+| B0 | 当前冻结的 visibility-aware 32D 全状态 PPO | 上界参考、nominal strong-tracking teacher、LiDAR/risk 数据主来源 |
 | B1 | 降信息 PPO，无风险 | 主退化 baseline |
 | B2 | 降信息 PPO + LiDAR-honest 启发式风险 | 手工风险 baseline |
 | B3 | 降信息 PPO + 学习型状态风险 `p_lost(s_red)` | 只含 bridge 的学习 baseline |
 | B4 | 降信息 PPO + 学习型动作条件风险调制 | 本文主方法 |
+
+### 当前冻结 B0
+- **B0 run：** `runs/PE_20260520_110828`
+- **B0 checkpoint：** `policy_pool/ppo_upd_001300_step_2396160000.pth`
+- **B0 语义：** 当前 visibility-loss penalty reward 下训练得到的全状态追逐策略；训练结束时处于 `stage_idx=3`，即 `3m + vis0.40`，未进入最终 `vis0.60`。
+- **B0 可用性判断：** 可以作为后续 LiDAR rollout 与风险模型预测的 nominal strong-tracking baseline；它不是“完全不丢视野”的理想策略，但成功率、3m 到达率和终端可见性已足够稳定，同时仍保留非平凡丢视野/恢复样本。
 
 ## 必需外部比较框架（Intro / Related Work 基础）
 本文的科学核心不是“又一个 RL 追逃算法”，而是在 **有限视场/有限可检测条件下的 UAV 追逐** 中，通过 **约束下动作优化** 保持目标可观测性；强化学习是实现和训练支撑。外部比较必须按以下四个轴组织。
@@ -202,21 +208,35 @@ B4 必需内部对照：
 - [x] 新增 `tests/test_pursuit_visibility_recovery.py`，覆盖 final-detectable success gate、短暂丢失后恢复、visibility counters，以及 exporter recovery stats 实际落盘。
 - [x] 基于 `runs/PE_20260518_133223` 验证：后三个 visibility 阶段 SR 基本保持 `0.998-1.000`，final detectable 接近 1，但 final stage 平均 invisible steps 仍约 `498`、最新约 `451.5`；因此支持将 visibility 权重从 `0.10/0.20/0.30` 提高到 `0.15/0.30/0.45`。
 - [ ] 同步当前权重上调后的测试和启动日志：`tests/test_curriculum_controller.py` 期望改为 `0.15/0.30/0.45`，`ppo_guidance.py` 启动文案同步为 `3m+vis0.15,3m+vis0.30,3m+vis0.45`，并重跑相关测试。
-- [ ] 使用 5-stage visible-strike curriculum 重新训练/筛选 visibility-aware teacher，并重新跑 LiDAR rollout export + label summary。
-- [ ] 构建 dataset manifest（LiDAR 主线数据）。
+- [x] 基于 `runs/PE_20260520_110828` 完成当前 B0 visibility-aware teacher 筛选：冻结 `policy_pool/ppo_upd_001300_step_2396160000.pth` 作为 `B0: current vis-reward tracking baseline`。
+- [x] 修复动态 Warp LiDAR target mesh stale 问题：sensor render 前同步 Warp mesh，使 geometry detectable 与 semantic/range image 回到同一帧。
+- [ ] 在 mesh-sync 修复后的冻结 B0 上重新跑 LiDAR rollout export + label summary。
+- [ ] 将 LiDAR exporter 拆成 `smoke` 与 `dataset` mode；正式 dataset mode 默认不保存 PNG。
+- [ ] 实现 `ladder_v1` checkpoint preset，覆盖弱策略、初学追近、高成功低 visibility、visibility early stage、强 visibility teacher，支持 manifest stratified 自动选择与手动覆盖。
+- [ ] 实现 risk dataset shard schema：`lidar_range_norm`、deployable `ego_obs`、history action、behavior/candidate action、policy mean/std、multi-head labels、QA metadata。
+- [ ] 实现 anchor sampling：`stride/event/stratified`，优先保存 loss/recovery/boundary/low-pixel/hard-case 窗口。
+- [ ] 实现 QA gates：semantic-geometry alignment、detectable target pixels、positive rate、tier/source coverage、leakage assertions、split-by-checkpoint/source。
+- [ ] 生成 `D0 offline policy-pool` 数据集，过 QA 后冻结为 risk model 训练输入。
 - **状态：** in_progress
 
 ### 第 6.3 阶段：离线风险模型训练
-- [ ] 实现 LiDAR range-image/point feature stack 输入路径和冻结 `z_lidar = 64` encoder。
-- [ ] 实现 `p_lost(s_red)` 和 `R_obs(s_red, u)` 预测头。
-- [ ] 离线训练和校准。
-- [ ] 验证离线指标（ECE、Brier score、AUROC）。
+- [ ] 实现 multi-head risk label：`p_loss_H`、`severity_H`、`first_loss_offset`、`p_recover_H`，支持 `H={50,150,300}`。
+- [ ] Stage 6.3-A：K-frame CNN state-risk baseline，验证 LiDAR/range labels 可学。
+- [ ] Stage 6.3-B：CNN encoder + GRU temporal risk model，作为默认主力结构。
+- [ ] Stage 6.3-C：action perturbation `R(o, u - policy_mean)`，先验证 action-conditioned risk 是否比 state-risk 有增益。
+- [ ] Stage 6.3-D：candidate-action ranking / branch rollout，验证模型能否区分不同候选动作的脱视野风险。
+- [ ] Stage 6.3-E：Mamba/SSM temporal model 作为 GRU baseline 成立后的 creative stage；LSTM/Transformer 只做 ablation。
+- [ ] 离线训练和校准，记录 AUROC、AUPRC、Brier、ECE、false-safe rate、severity/time/recovery 指标。
+- [ ] 在 heldout checkpoint/source 上验证泛化；不允许同一 checkpoint episode 同时出现在 train/test。
 - **状态：** pending
 
 ### 第 6.4 阶段：降信息策略实现（B1-B4）
-- [ ] 实现 B1-B4 观测/控制模式。
-- [ ] 实现动作条件风险调制 PPO 的最小版本。
-- [ ] large-scale 训练前运行 smoke test 和小 rollout 诊断。
+- [ ] 实现 B1-B4 reduced-observation modes，并保留 B0 full-state baseline 作为上限参照。
+- [ ] 先接入 frozen risk model，不在同一 PPO rollout 中同步更新 risk model。
+- [ ] 运行 fixed lambda grid：`{0,0.02,0.05,0.1,0.2}`，定标 risk penalty scale。
+- [ ] 在固定网格确认有效后，实现 adaptive dual lambda，约束指标使用 persistent loss / over-horizon risk。
+- [ ] 实现 DAgger-like aggregation：`D0 -> R0 -> risk PPO -> D1 -> R1`，每轮混合 offline policy-pool、current risk-PPO、action noise、hard cases、scripted stress cases。
+- [ ] large-scale 训练前运行 smoke test、小 rollout 诊断和可见性 QA。
 - **状态：** pending
 
 ### 第 6.5 阶段：完整训练与评估

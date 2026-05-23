@@ -371,6 +371,8 @@ class EnvManager(BaseManager):
         # render sensors after the physics step
         if self.robot_manager.has_IGE_sensors:
             self.IGE_env.step_graphics()
+        if self.cfg.env.use_warp:
+            self.warp_env.reset_idx(torch.arange(self.cfg.env.num_envs, device=self.device))
         self.robot_manager.capture_sensors()
 
     def render_viewer(self):

@@ -11,6 +11,23 @@ class CurriculumController:
         (3.0, 0.40),
         (3.0, 0.60),
     )
+    VISIBILITY_MAX_GATES = {
+        2: {
+            "visibility_episode_max_loss_steps": 250.0,
+        },
+        3: {
+            "visibility_episode_max_loss_steps": 180.0,
+            "visibility_episode_invisible_steps": 400.0,
+        },
+    }
+    VISIBILITY_MIN_GATES = {
+        2: {
+            "visibility_episode_recovery_rate_within_horizon": 0.75,
+        },
+        3: {
+            "visibility_episode_recovery_rate_within_horizon": 0.90,
+        },
+    }
 
     def __init__(self, task_config, args):
         self.task_config = task_config
@@ -55,6 +72,7 @@ class CurriculumController:
             succ_rate is not None
             and finished_episodes >= self.stable_success_min_episodes
             and float(succ_rate) >= self.stable_success_rate
+            and self._visibility_ready(episode_rewards_summary)
         )
         if success_ready:
             self.stage_success_streak += 1
@@ -86,7 +104,33 @@ class CurriculumController:
             "stable_success_rate": self.stable_success_rate,
             "stable_success_updates": self.stable_success_updates,
             "completed_stage_idx": old_stage_idx,
+            "visibility_max_gates": self.VISIBILITY_MAX_GATES.get(old_stage_idx, {}),
+            "visibility_min_gates": self.VISIBILITY_MIN_GATES.get(old_stage_idx, {}),
         }
+
+    def _visibility_ready(self, episode_rewards_summary):
+        max_gates = self.VISIBILITY_MAX_GATES.get(self.stage_idx, {})
+        min_gates = self.VISIBILITY_MIN_GATES.get(self.stage_idx, {})
+        for key, threshold in max_gates.items():
+            value = self._summary_mean(episode_rewards_summary, key)
+            if value is None or value > threshold:
+                return False
+        for key, threshold in min_gates.items():
+            value = self._summary_mean(episode_rewards_summary, key)
+            if value is None or value < threshold:
+                return False
+        return True
+
+    @staticmethod
+    def _summary_mean(summary, key):
+        value = summary.get(key)
+        if value is None:
+            return None
+        if isinstance(value, (list, tuple)):
+            if not value:
+                return None
+            return sum(float(item) for item in value) / float(len(value))
+        return float(value)
 
     def log_curriculum_metrics(self, writer, global_step):
         """Log curriculum diagnostics to TensorBoard."""

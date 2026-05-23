@@ -37,6 +37,17 @@ def make_task_config():
     return SimpleNamespace(reward=reward)
 
 
+def make_episode_summary(**overrides):
+    values = {
+        "count": 128,
+        "visibility_episode_max_loss_steps": [0.0],
+        "visibility_episode_invisible_steps": [0.0],
+        "visibility_episode_recovery_rate_within_horizon": [1.0],
+    }
+    values.update(overrides)
+    return values
+
+
 def assert_reward_state(testcase, task_config, threshold, visibility_weight):
     testcase.assertAlmostEqual(task_config.reward.success_threshold, threshold)
     testcase.assertAlmostEqual(
@@ -116,7 +127,7 @@ class CurriculumControllerTest(unittest.TestCase):
                 continue
             transition = controller.update(
                 succ_rate=0.99,
-                episode_rewards_summary={"count": 128},
+                episode_rewards_summary=make_episode_summary(),
             )
             self.assertIsNotNone(transition)
 
@@ -143,6 +154,36 @@ class CurriculumControllerTest(unittest.TestCase):
         self.assertEqual(controller.stage_idx, 3)
         self.assertEqual(controller.stage_success_streak, 2)
         assert_reward_state(self, task_config, 3.0, 0.40)
+
+    def test_visibility_gates_block_visibility_stage_transition(self):
+        args = make_args(curriculum_stable_success_updates=1)
+        task_config = make_task_config()
+        controller = CurriculumController(task_config, args)
+        controller.stage_idx = 2
+        controller._apply_stage(controller.stage_idx)
+
+        transition = controller.update(
+            succ_rate=0.99,
+            episode_rewards_summary=make_episode_summary(
+                visibility_episode_max_loss_steps=[300.0],
+                visibility_episode_recovery_rate_within_horizon=[0.95],
+            ),
+        )
+
+        self.assertIsNone(transition)
+        self.assertEqual(controller.stage_idx, 2)
+        self.assertEqual(controller.stage_success_streak, 0)
+
+        transition = controller.update(
+            succ_rate=0.99,
+            episode_rewards_summary=make_episode_summary(
+                visibility_episode_max_loss_steps=[200.0],
+                visibility_episode_recovery_rate_within_horizon=[0.95],
+            ),
+        )
+
+        self.assertIsNotNone(transition)
+        self.assertEqual(controller.stage_idx, 3)
 
 
 if __name__ == "__main__":

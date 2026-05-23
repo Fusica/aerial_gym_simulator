@@ -80,6 +80,42 @@ OUTPUT_ACTION_EXEC_NAMES = (
     "torque_y",
     "torque_z",
 )
+VISIBILITY_EPISODE_METRIC_KEYS = (
+    "final_target_detectable",
+    "visibility_loss_steps",
+    "visibility_episode_invisible_steps",
+    "visibility_episode_loss_segments",
+    "visibility_episode_recovered_segments",
+    "visibility_episode_max_loss_steps",
+    "visibility_episode_over_horizon_steps",
+    "visibility_episode_recovered_within_horizon_segments",
+    "visibility_episode_loss_area",
+    "visibility_episode_recovery_rate_within_horizon",
+)
+VISIBILITY_REWARD_INFO_KEYS = VISIBILITY_EPISODE_METRIC_KEYS[1:]
+EPISODE_METRIC_MAP = {
+    "r_final_relative_dist": ("episode_metrics/final_relative_dist", "final_relative_dist"),
+    "r_final_forward_alignment": (
+        "episode_metrics/final_forward_alignment",
+        "final_forward_alignment",
+    ),
+    "r_min_relative_dist": ("episode_metrics/min_relative_dist", "min_relative_dist"),
+    "r_episode_mean_closing_speed": (
+        "episode_metrics/episode_mean_closing_speed",
+        "episode_mean_closing_speed",
+    ),
+    "r_approach_fraction": ("episode_metrics/approach_fraction", "approach_fraction"),
+    "r_episode_min_hazard_clearance": (
+        "episode_metrics/episode_min_hazard_clearance",
+        "episode_min_hazard_clearance",
+    ),
+}
+EPISODE_METRIC_MAP.update(
+    {
+        f"r_{key}": (f"episode_metrics/{key}", key)
+        for key in VISIBILITY_EPISODE_METRIC_KEYS
+    }
+)
 
 
 def resolve_output_action_command_names(controller_name: str):
@@ -745,13 +781,7 @@ class RecordEpisodeStatisticsTorch:
             infos["r_episode_min_hazard_clearance"] = self.returned_episode_min_hazard_clearance
         if "target_detectable" in reward_info:
             infos["r_final_target_detectable"] = reward_info["target_detectable"].float()
-        for key in (
-            "visibility_loss_steps",
-            "visibility_episode_invisible_steps",
-            "visibility_episode_loss_segments",
-            "visibility_episode_recovered_segments",
-            "visibility_episode_max_loss_steps",
-        ):
+        for key in VISIBILITY_REWARD_INFO_KEYS:
             if key in reward_info:
                 infos[f"r_{key}"] = reward_info[key].float()
         return (
@@ -1230,12 +1260,7 @@ if __name__ == "__main__":
                 "episode_mean_closing_speed": [],
                 "approach_fraction": [],
                 "episode_min_hazard_clearance": [],
-                "final_target_detectable": [],
-                "visibility_loss_steps": [],
-                "visibility_episode_invisible_steps": [],
-                "visibility_episode_loss_segments": [],
-                "visibility_episode_recovered_segments": [],
-                "visibility_episode_max_loss_steps": [],
+                **{key: [] for key in VISIBILITY_EPISODE_METRIC_KEYS},
                 "done_timeout": 0,
                 "done_collision": 0,
                 "done_success": 0,
@@ -1387,49 +1412,7 @@ if __name__ == "__main__":
                                     )
                                     episode_rewards_summary["contrib_component_returns"][component].append(reward_value)
 
-                            episode_metric_map = {
-                                "r_final_relative_dist": ("episode_metrics/final_relative_dist", "final_relative_dist"),
-                                "r_final_forward_alignment": (
-                                    "episode_metrics/final_forward_alignment",
-                                    "final_forward_alignment",
-                                ),
-                                "r_min_relative_dist": ("episode_metrics/min_relative_dist", "min_relative_dist"),
-                                "r_episode_mean_closing_speed": (
-                                    "episode_metrics/episode_mean_closing_speed",
-                                    "episode_mean_closing_speed",
-                                ),
-                                "r_approach_fraction": ("episode_metrics/approach_fraction", "approach_fraction"),
-                                "r_episode_min_hazard_clearance": (
-                                    "episode_metrics/episode_min_hazard_clearance",
-                                    "episode_min_hazard_clearance",
-                                ),
-                                "r_final_target_detectable": (
-                                    "episode_metrics/final_target_detectable",
-                                    "final_target_detectable",
-                                ),
-                                "r_visibility_loss_steps": (
-                                    "episode_metrics/visibility_loss_steps",
-                                    "visibility_loss_steps",
-                                ),
-                                "r_visibility_episode_invisible_steps": (
-                                    "episode_metrics/visibility_episode_invisible_steps",
-                                    "visibility_episode_invisible_steps",
-                                ),
-                                "r_visibility_episode_loss_segments": (
-                                    "episode_metrics/visibility_episode_loss_segments",
-                                    "visibility_episode_loss_segments",
-                                ),
-                                "r_visibility_episode_recovered_segments": (
-                                    "episode_metrics/visibility_episode_recovered_segments",
-                                    "visibility_episode_recovered_segments",
-                                ),
-                                "r_visibility_episode_max_loss_steps": (
-                                    "episode_metrics/visibility_episode_max_loss_steps",
-                                    "visibility_episode_max_loss_steps",
-                                ),
-                            }
-
-                            for key, (tb_tag, summary_key) in episode_metric_map.items():
+                            for key, (tb_tag, summary_key) in EPISODE_METRIC_MAP.items():
                                 if key in info:
                                     metric_value = info[key][idx].item()
                                     writer.add_scalar(tb_tag, metric_value, global_step)
@@ -1500,14 +1483,7 @@ if __name__ == "__main__":
                     avg_len = sum(episode_rewards_summary["lengths"]) / len(episode_rewards_summary["lengths"])
                     summary_items.append(f"avg_len: {avg_len:.1f} steps")
                 avg_visibility_metrics = {}
-                for key in (
-                    "final_target_detectable",
-                    "visibility_loss_steps",
-                    "visibility_episode_invisible_steps",
-                    "visibility_episode_loss_segments",
-                    "visibility_episode_recovered_segments",
-                    "visibility_episode_max_loss_steps",
-                ):
+                for key in VISIBILITY_EPISODE_METRIC_KEYS:
                     metric_values = episode_rewards_summary[key]
                     avg_visibility_metrics[key] = (
                         sum(metric_values) / len(metric_values) if metric_values else None

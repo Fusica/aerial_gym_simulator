@@ -18,6 +18,7 @@
 |---------|--------|----------|------|------|------|---------|------|
 | E0-C1 | 控制器预验证 | B0 (e1) | 1 | completed | 1.2B | 全状态 32D | e1 参数（scale=3.0），无课程学习 |
 | E0-C2 | 控制器预验证 | B0 (默认) | 1 | completed | 1.2B | 全状态 32D | 仓库默认参数（scale=2.0），无课程学习 |
+| E0-B0-VIS-20260520 | B0 冻结 | B0 | 1 | completed | 2.396B | 全状态 32D + visibility reward | `PE_20260520_110828`，冻结 `upd_1300` 作为当前 vis-reward tracking baseline |
 
 ## 实验详情
 
@@ -136,6 +137,33 @@
 | 成功涌现 | 从未出现 | 5.23 亿步出现 | 探索 + 精度窗口匹配时才出现 |
 | 学习持续性 | 已停滞 | 仍在改善 | 成功奖励提供了持续的学习动力 |
 
+### E0-B0-VIS-20260520：当前 visibility-aware B0 冻结
+- **状态：** completed
+- **运行 ID：** `runs/PE_20260520_110828`
+- **冻结 checkpoint：** `runs/PE_20260520_110828/policy_pool/ppo_upd_001300_step_2396160000.pth`
+- **训练配置：** `--curriculum`，512 envs，3600 steps/update，`total_timesteps=2,400,000,000`
+- **最终保存点：** update `1300`，global step `2,396,160,000`，progress fraction `0.9984`
+- **最终 curriculum：** `stage_idx=3`，`3m + vis0.40`，`stage_success_streak=20/100`，未进入最终 `vis0.60`
+- **用途：** 当前 `B0: current vis-reward tracking baseline`；作为后续 LiDAR rollout、risk label、B1-B4 训练/评估的 nominal strong-tracking teacher。
+
+**最后 10 个保存点关键结果：**
+| 指标 | 均值 ± SD | 解读 |
+|------|-----------|------|
+| 成功率 | `0.996887 ± 0.002338` | 追踪/终端可见成功已稳定 |
+| 3m 到达率 | `0.999265 ± 0.000601` | 3m visible-strike 门槛基本稳定达成 |
+| 5m 到达率 | `0.999830 ± 0.000273` | 大范围追近能力稳定 |
+| 终端可见率 | `0.998244 ± 0.002047` | success gate 的 final detectable 基本满足 |
+| 平均最终距离 | `2.964 ± 0.027m` | 终点稳定在 3m 附近 |
+| 累计不可见步数 | `264.591 ± 6.793` | 仍存在非平凡丢视野样本 |
+| 最长连续不可见 | `120.250 ± 1.685` | 通常低于 `H=150` recovery horizon |
+| over-horizon 不可见步数 | `7.083 ± 1.112` | 长失锁严重尾部较少但未完全消失 |
+| horizon 内恢复率 | `0.901056 ± 0.008220` | 约 90% 丢视野片段能在 150 step 内恢复 |
+
+**阶段判断：**
+- 该 run 足够作为 B0，不需要等待一个完全不丢视野的 teacher。
+- B0 不是本文方法，也不是最终 `vis0.60` 上界；它是当前可复现的强跟踪/有恢复样本 baseline。
+- 后续数据采集应以 `upd_1300` 为主，并混入 stage2/3 代表 checkpoint 扩充风险覆盖。
+
 ### E1：离线标签与预测器质量
 - **状态：** pending
 - **尚无实验运行**
@@ -172,6 +200,7 @@
 |---------|--------|--------|--------|------------------|-----------|--------|---------|
 | E0-C1 | 0.0000 | 1.000 | 0.000 | 3600.0 | - | - | - |
 | E0-C2 | 0.0097 | 0.986 | 0.004 | 3585.7 | - | - | - |
+| E0-B0-VIS-20260520 | 0.9969 | 0.001-0.003 | 0.001-0.005 | 1044.4 | 264.6 steps invisible | 0.901 | max loss 120.3 steps |
 
 ### 诊断 Metric
 | 实验 ID | 熵 (最终) | 演员标准差 | 指令饱和率 | Pre-tanh OOB | 最终距离 | 最小距离 | 1m 到达率 | 3m 到达率 |
@@ -183,7 +212,7 @@
 
 | Baseline ID | 描述 | 观测条件 | 风险信号 | PPO 融合方式 |
 |------------|------|---------|---------|---------|
-| B0 | Full-State PPO | 原始 32D | 无 | 无 |
+| B0 | Current visibility-aware Full-State PPO (`PE_20260520_110828/upd_1300`) | 原始 32D | 训练 reward 含 visibility penalty；策略推理仍为全状态 PPO | 无 |
 | B1 | Reduced-State PPO | 降信息 | 无 | 无 |
 | B2 | Reduced-State + Heuristic Risk | 降信息 | 启发式 | 无 |
 | B3 | Reduced-State + Learned State Risk | 降信息 | 学习型 `p_lost(s_red)` | 无 |
@@ -201,6 +230,30 @@
 | B4-A5 | PPO-Lagrangian using same risk as cost | 排除“只是 safe PPO/CPO 变体”的解释 | planned |
 | B4-A6 | Shield/filter using same risk post-hoc | 排除“只是动作过滤/投影”的解释 | planned |
 | B4-A7 | Privileged critic baseline | 排除“只是 asymmetric actor-critic/privileged learning”的解释 | planned |
+| B4-A8 | Fixed lambda grid `{0,0.02,0.05,0.1,0.2}` | 定标 risk penalty scale，避免一接入就压死追击 | planned |
+| B4-A9 | Adaptive dual lambda | 对比约束式 lambda 是否比固定 lambda 更稳 | planned |
+| B4-A10 | No DAgger aggregation vs DAgger-like aggregation | 验证在线聚合是否改善当前策略分布偏差 | planned |
+| B4-A11 | Frozen-risk PPO vs synchronous risk/PPO update | 验证同步共训是否引入闭环偏差；默认不作为主线 | planned |
+| B4-A12 | Candidate-action branch/ranking | 验证 action-conditioned 风险不是状态风险伪装 | planned |
+
+## 风险模型时序结构注册
+
+| 模型 ID | 描述 | 目的 | 状态 |
+|---|---|---|---|
+| R-T0 | Single-frame CNN | 风险模型 lower bound，确认单帧 LiDAR 是否已经足够预测短期脱视野 | planned |
+| R-T1 | K-frame CNN (`K=3/5/8`) | 最小时间上下文 baseline，避免过早引入 RNN/SSM 复杂度 | planned |
+| R-T2 | CNN encoder + GRU | 默认主力 temporal risk model，兼顾部分可观性和计算成本 | planned |
+| R-T3 | CNN encoder + Mamba/SSM | GRU baseline 成立后的轻量长上下文候选 | planned |
+| R-T4 | CNN encoder + LSTM | GRU 消融，不作为默认主线 | planned |
+| R-T5 | CNN encoder + Transformer | 高容量 temporal ablation，用于判断性能上限与过拟合风险 | planned |
+
+## Risk Dataset 注册
+
+| 数据集 ID | 描述 | 输入 | 标签 | QA | 状态 |
+|---|---|---|---|---|---|
+| D0-ladder-v1 | policy-pool 离线数据集，来自多阶段 checkpoint ladder | `lidar_range_norm`、deployable `ego_obs`、history action、behavior policy stats | `p_loss_H`、`severity_H`、`first_loss_offset`、`p_recover_H` | semantic-geometry alignment、detectable-pixel consistency、source/tier coverage | planned |
+| D1-risk-ppo-v1 | R0 frozen-risk PPO 在线聚合数据 | 同 D0，额外记录 risk score、lambda、candidate action metadata | 同 D0 | coverage shift、hard-case density、false-safe replay | planned |
+| D2-risk-ppo-v2 | R1 后第二轮聚合数据 | 同 D1 | 同 D0 | 与 D0/D1 split-by-source 去泄漏 | planned |
 
 ## LiDAR 稀疏返回工程验证注册（新增）
 
@@ -211,3 +264,4 @@
 | S2 | angular resolution / range noise / latency / reflectivity sensitivity | 防止过度依赖单一 LiDAR profile | planned |
 | S3 | 0/1/2/5/10 target-return sparse-point ablation | 将 100-200m 写成 sparse-return stress test | planned |
 | S4 | matched-state candidate-action risk ranking | 验证 `R_obs(s_red,u)` 不是状态风险伪装 | planned |
+| S5 | Warp LiDAR dynamic target mesh sync regression check | 确保动态 rollout 中 geometry detectable 与 semantic/range image 使用同一帧 target mesh | completed 2026-05-23 |

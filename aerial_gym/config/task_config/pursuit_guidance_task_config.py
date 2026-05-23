@@ -151,7 +151,8 @@ class task_config:
         weight_alignment = 0.005
         visibility_reward_weight_scale = 0.0
         visibility_loss_persist_steps = 10
-        weight_visibility_loss_penalty = 0.05
+        visibility_recovery_horizon_steps = 150
+        weight_visibility_loss_penalty = 0.1
         weight_success_bonus = 0.15
         weight_effort = 1.0
         weight_avoid = 0.15

@@ -1,4 +1,5 @@
 import math
+from dataclasses import replace
 
 import torch
 import numpy as np
@@ -11,11 +12,16 @@ from aerial_gym.config.sensor_config.lidar_config.pursuit_forward_lidar_config i
 )
 from aerial_gym.sim.sim_builder import SimBuilder
 from aerial_gym.task.base_task import BaseTask
+from aerial_gym.task.pursuit_guidance_task.risk_geometry import (
+    detection_frustum_from_lidar_config,
+    normalize_visibility_window,
+    target_in_detection_frustum,
+    visibility_loss_penalty_from_steps,
+)
 from aerial_gym.utils.math import (
     compute_vee_map,
     quat_axis,
     quat_from_euler_xyz_tensor,
-    quat_mul,
     quat_rotate_inverse,
     quat_to_rotation_matrix,
 )
@@ -101,6 +107,15 @@ class PursuitGuidanceTask(BaseTask):
         )
         self.visibility_episode_max_loss_steps = torch.zeros(
             self.num_envs, dtype=torch.int32, device=self.device
+        )
+        self.visibility_episode_over_horizon_steps = torch.zeros(
+            self.num_envs, dtype=torch.int32, device=self.device
+        )
+        self.visibility_episode_recovered_within_horizon_segments = torch.zeros(
+            self.num_envs, dtype=torch.int32, device=self.device
+        )
+        self.visibility_episode_loss_area = torch.zeros(
+            self.num_envs, dtype=torch.float32, device=self.device
         )
 
         self.target_command = torch.zeros((self.num_envs, 4), device=self.device)
@@ -265,52 +280,14 @@ class PursuitGuidanceTask(BaseTask):
             lidar_cfg = sensor_cfg.lidar_config
         else:
             lidar_cfg = PursuitForwardM3_120x25_UltraHighResLidarConfig
-        self.visibility_range_m = 150.0
-        self.visibility_min_forward_m = max(float(getattr(lidar_cfg, "min_range", 1e-6)), 1e-6)
-        self.visibility_horizontal_fov_min_rad = math.radians(float(lidar_cfg.horizontal_fov_deg_min))
-        self.visibility_horizontal_fov_max_rad = math.radians(float(lidar_cfg.horizontal_fov_deg_max))
-        self.visibility_vertical_fov_min_rad = math.radians(float(lidar_cfg.vertical_fov_deg_min))
-        self.visibility_vertical_fov_max_rad = math.radians(float(lidar_cfg.vertical_fov_deg_max))
-
-        min_translation = torch.tensor(
-            getattr(lidar_cfg, "min_translation", getattr(lidar_cfg, "nominal_position", [0.0, 0.0, 0.0])),
-            dtype=torch.float32,
-            device=self.device,
+        frustum = detection_frustum_from_lidar_config(lidar_cfg)
+        self.visibility_frustum = replace(
+            frustum,
+            min_forward_m=max(
+                frustum.min_forward_m,
+                float(getattr(self.task_config.reward, "eps", 1e-6)),
+            ),
         )
-        max_translation = torch.tensor(
-            getattr(lidar_cfg, "max_translation", getattr(lidar_cfg, "nominal_position", [0.0, 0.0, 0.0])),
-            dtype=torch.float32,
-            device=self.device,
-        )
-        self.visibility_sensor_local_position = 0.5 * (min_translation + max_translation)
-
-        min_rotation = torch.deg2rad(
-            torch.tensor(
-                getattr(lidar_cfg, "min_euler_rotation_deg", [0.0, 0.0, 0.0]),
-                dtype=torch.float32,
-                device=self.device,
-            )
-        )
-        max_rotation = torch.deg2rad(
-            torch.tensor(
-                getattr(lidar_cfg, "max_euler_rotation_deg", [0.0, 0.0, 0.0]),
-                dtype=torch.float32,
-                device=self.device,
-            )
-        )
-        sensor_local_quat = quat_from_euler_xyz_tensor(0.5 * (min_rotation + max_rotation))
-        sensor_frame_quat = quat_from_euler_xyz_tensor(
-            torch.deg2rad(
-                torch.tensor(
-                    getattr(lidar_cfg, "euler_frame_rot_deg", [0.0, 0.0, 0.0]),
-                    dtype=torch.float32,
-                    device=self.device,
-                )
-            )
-        )
-        self.visibility_sensor_local_quat = quat_mul(
-            sensor_local_quat.view(1, 4), sensor_frame_quat.view(1, 4)
-        ).expand(self.num_envs, -1).contiguous()
 
     def close(self):
         if hasattr(self.sim_env, "delete_env"):
@@ -469,6 +446,9 @@ class PursuitGuidanceTask(BaseTask):
         self.visibility_episode_loss_segments[env_ids] = 0
         self.visibility_episode_recovered_segments[env_ids] = 0
         self.visibility_episode_max_loss_steps[env_ids] = 0
+        self.visibility_episode_over_horizon_steps[env_ids] = 0
+        self.visibility_episode_recovered_within_horizon_segments[env_ids] = 0
+        self.visibility_episode_loss_area[env_ids] = 0.0
 
     def _assign_target_motion_states(self, env_ids):
         if len(env_ids) == 0:
@@ -1501,6 +1481,13 @@ class PursuitGuidanceTask(BaseTask):
             | (relative_dist > float(cfg.far_terminate_distance))
             | (collision_mask & bool(cfg.terminate_on_collision))
         )
+        visibility_loss_segments = self.visibility_episode_loss_segments.float()
+        visibility_recovery_rate_within_horizon = torch.where(
+            visibility_loss_segments > 0.0,
+            self.visibility_episode_recovered_within_horizon_segments.float()
+            / torch.clamp(visibility_loss_segments, min=1.0),
+            torch.ones_like(visibility_loss_segments),
+        )
         return {
             "total": total,
             "progress": progress_reward,
@@ -1527,6 +1514,14 @@ class PursuitGuidanceTask(BaseTask):
             "visibility_episode_loss_segments": self.visibility_episode_loss_segments.float(),
             "visibility_episode_recovered_segments": self.visibility_episode_recovered_segments.float(),
             "visibility_episode_max_loss_steps": self.visibility_episode_max_loss_steps.float(),
+            "visibility_episode_over_horizon_steps": self.visibility_episode_over_horizon_steps.float(),
+            "visibility_episode_recovered_within_horizon_segments": (
+                self.visibility_episode_recovered_within_horizon_segments.float()
+            ),
+            "visibility_episode_loss_area": self.visibility_episode_loss_area,
+            "visibility_episode_recovery_rate_within_horizon": (
+                visibility_recovery_rate_within_horizon
+            ),
             "min_hazard_clearance": nearest_clearance,
             "relative_dist": relative_dist,
             "closing_speed": closing_speed,
@@ -1535,41 +1530,26 @@ class PursuitGuidanceTask(BaseTask):
         }, reset
 
     def _compute_target_detectable(self, relative_pos):
-        cfg = self.task_config.reward
         rel_body = quat_rotate_inverse(self.robot_state[:, 3:7], relative_pos)
-        rel_sensor = quat_rotate_inverse(
-            self.visibility_sensor_local_quat,
-            rel_body - self.visibility_sensor_local_position.view(1, 3),
-        )
-        sensor_dist = torch.norm(rel_sensor, dim=1)
-        forward = rel_sensor[:, 0]
-        lateral = rel_sensor[:, 1]
-        vertical = rel_sensor[:, 2]
-        min_forward = max(self.visibility_min_forward_m, float(cfg.eps))
-        horizontal_angle = torch.atan2(lateral, torch.clamp(forward, min=min_forward))
-        vertical_angle = torch.atan2(
-            vertical,
-            torch.clamp(torch.norm(rel_sensor[:, 0:2], dim=1), min=min_forward),
-        )
-
-        target_detectable = (
-            (forward > min_forward)
-            & (sensor_dist <= self.visibility_range_m)
-            & (horizontal_angle >= self.visibility_horizontal_fov_min_rad)
-            & (horizontal_angle <= self.visibility_horizontal_fov_max_rad)
-            & (vertical_angle >= self.visibility_vertical_fov_min_rad)
-            & (vertical_angle <= self.visibility_vertical_fov_max_rad)
-        )
-        return target_detectable
+        return target_in_detection_frustum(rel_body, self.visibility_frustum)
 
     def _compute_visibility_loss_penalty(self, target_detectable):
         cfg = self.task_config.reward
         was_lost = self.visibility_loss_steps > 0
         lost_started = (~target_detectable) & (~was_lost)
         recovered = target_detectable & was_lost
+        previous_loss_steps = self.visibility_loss_steps
+        persist_steps, horizon_steps = normalize_visibility_window(
+            getattr(cfg, "visibility_loss_persist_steps", 10),
+            int(getattr(cfg, "visibility_recovery_horizon_steps", 150)),
+        )
         self.visibility_episode_invisible_steps += (~target_detectable).to(torch.int32)
         self.visibility_episode_loss_segments += lost_started.to(torch.int32)
         self.visibility_episode_recovered_segments += recovered.to(torch.int32)
+        recovered_within_horizon = recovered & (previous_loss_steps <= horizon_steps)
+        self.visibility_episode_recovered_within_horizon_segments += (
+            recovered_within_horizon.to(torch.int32)
+        )
         self.visibility_loss_steps = torch.where(
             target_detectable,
             torch.zeros_like(self.visibility_loss_steps),
@@ -1579,15 +1559,25 @@ class PursuitGuidanceTask(BaseTask):
             self.visibility_episode_max_loss_steps,
             self.visibility_loss_steps,
         )
-        persist_steps = max(int(getattr(cfg, "visibility_loss_persist_steps", 10)), 1)
-        visibility_loss_penalty = (
-            torch.clamp(
-                self.visibility_loss_steps.float() / float(persist_steps),
-                min=0.0,
-                max=1.0,
-            )
+        invisible = ~target_detectable
+        over_horizon = self.visibility_loss_steps > horizon_steps
+        self.visibility_episode_over_horizon_steps += over_horizon.to(torch.int32)
+        clamped_loss_area = torch.clamp(
+            self.visibility_loss_steps.float() / float(horizon_steps),
+            min=0.0,
+            max=1.0,
         )
-        return visibility_loss_penalty
+        self.visibility_episode_loss_area += torch.where(
+            invisible,
+            clamped_loss_area,
+            torch.zeros_like(clamped_loss_area),
+        )
+        return visibility_loss_penalty_from_steps(
+            self.visibility_loss_steps,
+            invisible,
+            persist_steps,
+            horizon_steps,
+        )
 
     def _reset_visibility_tracking(self):
         self.visibility_loss_steps.zero_()
@@ -1595,3 +1585,6 @@ class PursuitGuidanceTask(BaseTask):
         self.visibility_episode_loss_segments.zero_()
         self.visibility_episode_recovered_segments.zero_()
         self.visibility_episode_max_loss_steps.zero_()
+        self.visibility_episode_over_horizon_steps.zero_()
+        self.visibility_episode_recovered_within_horizon_segments.zero_()
+        self.visibility_episode_loss_area.zero_()

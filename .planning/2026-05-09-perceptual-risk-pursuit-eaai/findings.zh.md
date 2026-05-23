@@ -346,6 +346,107 @@ Related Work 必须按论文科学约束组织：
 
 结尾差异句：已有工作分别覆盖有限可检测、UAV 追逃/在线规划和 safe/risk-aware action optimization；本文的缺口是 **在 sensor-honest LiDAR/range-image reduced inputs 下，学习动作条件可观测性丢失风险并将其调制 PPO**。
 
+### 2026-05-19 PE_20260519_103518 后的 visibility reward 设计结论
+
+- `runs/PE_20260519_103518` 说明 `0.20/0.40/0.60` 单纯加权不会线性降低 invisible steps；final stage 成功率仍接近 1，但中途长丢视野仍明显。
+- 根因是旧 `_compute_visibility_loss_penalty()` 在 `K_persist=10` 后饱和，导致 20 step 和 300 step 连续丢视野的每步边际成本相同。
+- 新设计把 teacher visibility 目标对齐到后续 risk 标签窗口：
+  - `K = 10` 后开始持续增大 penalty；
+  - `H = 150` 后进一步增大 penalty；
+  - 无 loss segment 的 episode 视为 `recovery_rate_within_horizon = 1.0`；
+  - 中途不可见仍保留轨迹，不 hard reset。
+- curriculum 推进不能只看 `success_rate`；visibility stages 至少需要 `max_loss` 和 `recovery_rate_within_horizon` 达标，避免快速追近掩盖长时间不可见。
+- 后续训练验收不应再主要看 `final_target_detectable`；应看：
+  - `visibility_episode_max_loss_steps`
+  - `visibility_episode_invisible_steps`
+  - `visibility_episode_recovery_rate_within_horizon`
+  - exporter 中的 `recovery_rate_within_horizon_steps` 和 `over_horizon_invisible_segments`
+
+### 2026-05-20 PE_20260520_000809 后的 visibility contribution 复盘
+
+- `runs/PE_20260520_000809` 支持用户观察：新 recovery-aware run 后期 visibility contribution 占比降到约 `14%`，总 `invisible_steps` 卡在约 `403`，而旧 `PE_20260519_103518` final stage 约 `17%` contribution、约 `340` invisible steps。
+- 但两个 run 不在同一阶段：新 run 仍处于 `stage=2, vis=0.20`，旧 run 已到 `stage=4, vis=0.60`；同样 `vis=0.20` 时，新 run 比旧 run 更好。因此问题不是“新 penalty 形状彻底错误”，而是低权重 stage 被 recovery gate 长期卡住，导致后续没有进入更高 visibility pressure。
+- 新旧 run 的指标分化说明：
+  - 新 run 更强地降低 `max_loss`：约 `168`，明显优于旧 final stage 的约 `305`。
+  - 旧 run 更强地降低总 `invisible_steps`：约 `340`，优于新 run 的约 `403`。
+  - 因此下一版 teacher 需要在保留 recovery-aware penalty 的同时，提高 stage 2 之后的总不可见步数压力。
+- 当前采用的最小修正：
+  - `weight_visibility_loss_penalty: 0.05 -> 0.08`。
+  - stage 2 `recovery_rate_within_horizon` gate: `0.80 -> 0.75`。
+  - 不修改 `success_mask`、LiDAR/FOV 几何、PPO loop 或 target motion。
+
+### 2026-05-20 risk geometry / exporter 可检测几何一致性修复
+
+- 问题：离线 `risk_geometry.py` 原先以 pursuer body frame 和对称 FOV 宽度判断 target detectable；而 reward 的 `_compute_target_detectable()` 会先应用 LiDAR local translation / quaternion，再使用 horizontal/vertical FOV 的 min/max 边界。
+- 影响：当 sensor 有非零安装偏移、非零局部姿态或非对称 FOV 时，离线 exporter 生成的 `detectable`、observability-loss label 和训练时 success/reward 的 visibility 语义不一致。
+- 当前修复：`DetectionFrustum` 显式保存 sensor 外参和 FOV min/max；离线标签先转到 sensor frame，再按 reward 同口径判断。exporter 构造 frustum 时使用 reward 当前的 150m detection range，而不是 LiDAR `max_range=300m`。
+- 保持不变：训练 reward、success 定义、LiDAR config、PPO loop 和 target motion 均未修改。
+
+### 2026-05-21 PE_20260520_110828 B0 baseline 冻结
+
+- `runs/PE_20260520_110828/policy_pool/manifest.jsonl` 共 `134` 条策略池记录；最后保存点为 `update=1300`、`global_step=2,396,160,000`、`progress_fraction=0.9984`。
+- 训练结束时仍在 `stage_idx=3`，即 `3m + vis0.40`；`stage_success_streak=20/100`，因此没有进入最终 `3m + vis0.60`。
+- 课程切换记录：
+  - `update=349`：stage 0 -> 1，`5m,vis0` -> `3m,vis0`。
+  - `update=464`：stage 1 -> 2，`3m,vis0` -> `3m,vis0.20`。
+  - `update=754`：stage 2 -> 3，`3m,vis0.20` -> `3m,vis0.40`。
+- 冻结 B0 checkpoint：`runs/PE_20260520_110828/policy_pool/ppo_upd_001300_step_2396160000.pth`。
+- B0 定义：`B0 = current vis-reward tracking baseline`，即当前 visibility-loss penalty reward 下的 32D 全状态 PPO strong-tracking teacher。
+- 最后 10 个策略池保存点的稳定指标：
+  - `success_rate = 0.996887 ± 0.002338`。
+  - `reach_3m = 0.999265 ± 0.000601`。
+  - `reach_5m = 0.999830 ± 0.000273`。
+  - `avg_final_relative_dist = 2.964 ± 0.027 m`。
+  - `final_target_detectable = 0.998244 ± 0.002047`。
+  - `visibility_episode_invisible_steps = 264.591 ± 6.793`。
+  - `visibility_episode_max_loss_steps = 120.250 ± 1.685`。
+  - `visibility_episode_over_horizon_steps = 7.083 ± 1.112`。
+  - `visibility_episode_recovery_rate_within_horizon = 0.901056 ± 0.008220`。
+- 指标解释：
+  - `invisible_steps` 是每个 episode 的目标不可见总步数。
+  - `max_loss_steps` 是每个 episode 内最长一次连续不可见长度。
+  - `over_horizon_steps` 只统计连续不可见超过 `H=150` 后的严重尾部，不等同于总不可见步数。
+  - `recovery_rate_within_horizon` 是丢视野片段在 `H=150` 步内恢复可见的比例。
+- 判断：当前 B0 追踪/捕获能力已经足够作为后续比较基线和 LiDAR 数据采集 teacher；它不是“完全不丢视野”的理想策略，但仍有约 `260` 步累计不可见和少量 over-horizon 尾部，对风险模型训练反而提供必要的非平凡风险样本。
+- 后续数据采集建议：以 `upd_1300` 作为主 B0 rollout teacher，同时混入 stage2 末端和 stage3 早中晚期 checkpoint（如 `750/830/950/1070/1200/1280/1300`）以覆盖更多丢视野、恢复和动作条件边界。
+
+### 2026-05-23 Warp LiDAR target mesh stale bug
+
+- 根因：pursuit target 每 step 更新 `target_state`，但 Warp LiDAR 用于 raycast/semantic 的环境 mesh 只在 reset 时 refit；因此 reward/exporter 的几何 detectable 使用的是当前 target state，而 sensor image 看到的是旧 target mesh。
+- 这直接解释之前的异常：
+  - 动态 rollout 中大量 `geometry_detectable=True` 但 `target_pixel_count=0`，不是 teacher 一定把目标甩出真实视野，而是几何状态与 Warp sensor mesh 不在同一帧。
+  - terminal 成功帧距离已经约 `3m`，但尾帧 semantic 中没有 target，center ray 命中环境 semantic id（如 `44/46/-2`），符合“raycast 在旧 mesh/背景上采样”的现象。
+  - 静态场景重置后目标不移动，mesh 与 state 暂时一致，所以 2m/5m/10m 能看到 target pixels；动态场景一移动就错位。
+- pre-fix 诊断摘要（已清理调试产物，仅保留结论）：5 个 stage checkpoint 中，几何可检测帧大量无法在 semantic 中看到 target，例如 `upd340: 247/245 geom_pix0`、`upd610: 617/617 geom_pix0`、`upd1300: 756/662 geom_pix0`。
+- core fix：在 `EnvManager.render_sensors()` 中，sensor capture 前对 Warp env 执行一次 mesh refit/sync，使 LiDAR raycast 使用当前 actor pose。
+- post-fix 诊断摘要：同一组 5 个 checkpoint 重新采样后，`visible|geometry = 1.0`，`geom_pix0 = 0`；terminal target pixels 从 `0` 恢复为数千到数万级（例如 `upd340: 10523`、`upd460: 17407`、`upd754: 32687`）。
+- 决策含义：当前不能用修复前的低可见率/低像素统计判断 teacher reward 或 curriculum 失败；必须基于 mesh-sync 修复后的干净 rollout 重新统计 `target_visible_frame_rate`、`visible|detectable` 和可见帧平均像素，再决定是否重训 B0。
+
+### 2026-05-23 三 agent 风险数据/模型/PPO 集成计划
+
+- 本轮三 agent review 结论：当前主线应从可视化 smoke 转为可训练 risk dataset；risk model 与 PPO 不应第一版同步在线共训，而应采用 `offline dataset -> frozen risk model -> risk-modulated PPO -> DAgger-like aggregation -> offline retrain` 的周期。
+- 数据采集结论：
+  - 正式输入只保存真实 stream：`lidar_range_norm`，当前格式为 `[B,T,501,2401]`，建议 `float16` 分片保存。
+  - PNG、full segmentation image 不进入正式 dataset；`target_pixel_count`、bbox、centroid、semantic-visible 只作为 QA metadata。
+  - checkpoint 选择使用阶梯式 `ladder_v1`，覆盖弱策略、初学追近、高成功低 visibility、visibility early stage、强 visibility teacher，而不是只采最终 B0。
+- 标签结论：bool `observability_loss_label` 不足以引导 action；risk dataset 应输出多头监督：
+  - `label_loss_prob_H`：未来 `H` 内 persistent loss 的概率目标。
+  - `label_loss_severity_H`：未来 `H` 内不可见比例。
+  - `label_first_loss_offset`：第一次 persistent loss 起点。
+  - `label_recovery_H`：loss 后 `H` 内是否恢复。
+- 模型结论：
+  - 第一版先训练 state-risk / K-frame CNN，验证 LiDAR 与标签是否可学。
+  - 主力时序模型采用 CNN encoder + GRU；Mamba/SSM 作为 GRU baseline 成立后的 creative stage；Transformer/LSTM 只做 ablation。
+  - Action-conditioned `R_obs(o,u)` 不直接一步到位，先做 `u - policy_mean` perturbation，再做 candidate-action ranking/branch rollout。
+- PPO 集成结论：
+  - risk model 接入 PPO 时先 frozen，不在同一 PPO rollout 中同步更新 risk model。
+  - lambda 先固定网格 `{0, 0.02, 0.05, 0.1, 0.2}` 定标，再用 adaptive dual lambda；约束指标用 persistent loss / over-horizon，不用单帧 invisible rate。
+  - Online aggregation 是 DAgger-like，但不是无偏；每轮必须保留 offline policy pool、current risk-PPO、action noise、hard cases 和少量 scripted stress cases 的混合。
+- 替换全观测空间前的必要条件：
+  - B4 的 success/reach 至少达到 B0 的 `90%-95%`，并显著优于 B3。
+  - persistent-loss、over-horizon、max-loss 下降，且不是靠减速或不追击换 visible rate。
+  - risk model 在 heldout checkpoint/source 上 calibration、false-safe rate、candidate-action ranking 均达标。
+
 ## C. 工程归属与执行约束
 
 ### 实现归属
@@ -367,7 +468,7 @@ Related Work 必须按论文科学约束组织：
 - 已在 `ppo_guidance.py` 中添加训练期策略池保存：`runs/<run>/policy_pool/ppo_upd_*.pth` 保存 full training state，`policy_pool/manifest.jsonl` 同步 checkpoint 路径、update/global_step、课程阶段、成功率/reach rate、done 分布、reward 摘要和动作分布诊断，便于后续筛选策略池。
 
 ### 当前下一步
-1. 使用 5-stage visible-strike curriculum 重新训练 visibility-aware teacher。
-2. 用 exporter schema v2 重新导出 LiDAR rollout，并检查 recovery 指标分布。
+1. 以冻结 B0 `runs/PE_20260520_110828/policy_pool/ppo_upd_001300_step_2396160000.pth` 重新导出 LiDAR rollout，并检查 recovery 指标分布。
+2. 对 B0 rollout 重新生成 geometry labels 和 label summary。
 3. 在训练任何 predictor 前实现 dataset manifest 检查。
 4. 实现 B1-B4 降信息模式和动作条件风险调制。

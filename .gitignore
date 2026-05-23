@@ -16,3 +16,5 @@ runs/
 .codex/
 .claude/
 .agents/
+
+paper/main.pdf

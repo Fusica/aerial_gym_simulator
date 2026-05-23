@@ -433,6 +433,110 @@
   - `task_plan.zh.md`：新增当前写作模板规则。
   - `decision_log.zh.md`：新增 D034，并写入已锁定写作规则。
 
+## 2026-05-19（150-step recovery-aware visibility reward 实现）
+- 基于 `runs/PE_20260519_103518` 结论，确认 `0.20/0.40/0.60` 单纯加权已经进入收益递减：final stage 仍有约 `340+` invisible steps 和 `300+` max loss steps。
+- 实现新的 visibility penalty 形状：
+  - 默认 `visibility_loss_persist_steps = 10`。
+  - 新增 `visibility_recovery_horizon_steps = 150`。
+  - 不可见时 penalty 从基础成本开始，超过 `K=10` 后继续线性增大，超过 `H=150` 后进一步增大，不再在 10 step 后饱和。
+- 保持任务语义不变：
+  - success 仍要求 `3m + forward_alignment + final target_detectable`。
+  - 中途不可见不 hard reset，不把未来 risk label 直接塞进 reward。
+- 新增训练/manifest 指标：
+  - `visibility_episode_over_horizon_steps`
+  - `visibility_episode_recovered_within_horizon_segments`
+  - `visibility_episode_loss_area`
+  - `visibility_episode_recovery_rate_within_horizon`
+- curriculum controller 新增 visibility gate：
+  - stage 2 推进要求 `max_loss <= 250` 且 `recovery_rate_within_horizon >= 0.80`。
+  - stage 3 推进要求 `max_loss <= 180`、`invisible_mean <= 400` 且 `recovery_rate_within_horizon >= 0.90`。
+- exporter recovery stats 增加 horizon 口径：
+  - `recovery_rate_within_horizon_steps`
+  - `over_horizon_invisible_segments`
+- 交叉验证：
+  - 第一轮 2 个 subagent 均发现 no-loss episode 的 recovery rate 被错误算为 `0.0`，已修为无 loss segment 时返回 `1.0`。
+  - 第二轮 1 个 subagent 要求补生产默认 `K=10/H=150` 测试，已补。
+  - 最终 2 个 subagent 复核均为 no blocking findings。
+- 验证通过：
+  - `conda run -n aerialgym_v2 python -m unittest discover -s tests -p test_pursuit_visibility_recovery.py`
+  - `conda run -n aerialgym_v2 python -m unittest discover -s tests -p test_curriculum_controller.py`
+  - `conda run -n aerialgym_v2 python -m py_compile aerial_gym/task/pursuit_guidance_task/pursuit_guidance_task.py aerial_gym/rl_training/cleanrl/ppo_guidance.py aerial_gym/rl_training/cleanrl/curriculum/curriculum_controller.py aerial_gym/rl_training/cleanrl/export_pursuit_lidar_rollouts.py tests/test_pursuit_visibility_recovery.py tests/test_curriculum_controller.py`
+  - `git diff --check` targeted files
+
+## 2026-05-20（PE_20260520_000809 visibility plateau 复盘与权重修正）
+- 对比 `runs/PE_20260520_000809` 与旧 `runs/PE_20260519_103518`：
+  - 新 run 末段仍停在 `stage=2, vis=0.20`；最新约 `success_rate=0.999`、`invisible_steps=403`、`max_loss=168`、`recovery_rate=0.77`、visibility contribution 绝对占比约 `14%`。
+  - 旧 run final stage 为 `vis=0.60`；末段约 `invisible_steps=340`、`max_loss=305`、visibility contribution 绝对占比约 `17%`。
+  - 因此新 run 更好地压低了最长连续丢失，但没有继续压低总不可见步数；低权重 stage 的 recovery gate 把训练长期卡在 `0.20`，导致后期 visibility pressure 下降。
+- 设计结论：
+  - 150-step recovery-aware penalty 不是完全无效，但目标偏向 `max_loss/recovery`，对总 `invisible_steps` 的持续压力不足。
+  - `success_rate` 已不适合作为 visibility teacher 是否足够的主要指标；需要同时看 `invisible_steps`、`max_loss`、`recovery_rate` 和 `reward_contrib_ratio/visibility`。
+  - 不改 success、FOV 几何、PPO loop 或 target motion；先做最小 reward/curriculum 调整。
+- 实施修改：
+  - 将 `weight_visibility_loss_penalty` 从 `0.05` 提高到 `0.08`，提高 stage 2 之后的 visibility penalty 占比。
+  - 将 stage 2 的 `recovery_rate_within_horizon` 晋级 gate 从 `0.80` 放宽到 `0.75`，避免低权重阶段长期卡死；stage 3 更严格 gate 保持不变。
+  - 同步 `test_curriculum_controller.py` 与 `test_pursuit_visibility_recovery.py`，新增 `contrib_visibility` 使用配置权重的集成断言。
+
+## 2026-05-20（risk geometry 与 reward visibility 几何对齐）
+- 修复 residual risk：离线 exporter / `risk_geometry.py` 原先只用机体系相对位置和对称 FOV 判断 target detectable，未对齐 reward 里的 `_compute_target_detectable()`。
+- 最小实现：
+  - `DetectionFrustum` 增加 sensor local position、sensor local quaternion、horizontal/vertical min-max FOV 边界。
+  - `target_in_detection_frustum()` 先把 body-frame 相对位置转换到 sensor frame，再按 `forward > min_forward`、`range <= 150m`、FOV min/max 判断。
+  - `export_pursuit_lidar_rollouts.py::frustum_from_lidar_cfg()` 从 lidar config 构造同 reward 口径的 150m detection frustum 和传感器外参。
+- 不改变训练 reward、success 判定、FOV 配置或 PPO loop；只让后续离线 risk labels 与当前 reward visibility 逻辑一致。
+- 验证通过：
+  - `conda run -n aerialgym_v2 python -m unittest discover -s tests -p test_pursuit_risk_geometry.py`
+  - `conda run -n aerialgym_v2 python -m unittest discover -s tests -p test_pursuit_visibility_recovery.py`
+  - `conda run -n aerialgym_v2 python -m py_compile aerial_gym/task/pursuit_guidance_task/risk_geometry.py aerial_gym/rl_training/cleanrl/export_pursuit_lidar_rollouts.py tests/test_pursuit_risk_geometry.py tests/test_pursuit_visibility_recovery.py`
+
+## 2026-05-21（PE_20260520_110828 B0 冻结与阶段状态更新）
+- 使用 `data-analysis` 读取 `runs/PE_20260520_110828/policy_pool/manifest.jsonl`，确认该 run 是当前 visibility-loss penalty reward 下的最新完整训练记录。
+- 训练最终保存点：
+  - checkpoint：`runs/PE_20260520_110828/policy_pool/ppo_upd_001300_step_2396160000.pth`
+  - update/global step：`1300 / 2,396,160,000`
+  - progress fraction：`0.9984`
+  - curriculum：`stage_idx=3`，`current_threshold=3.0`，`visibility_reward_weight_scale=0.4`
+  - stage success streak：`20/100`
+- 课程推进事实：
+  - `update=349` 进入 `3m,vis0`。
+  - `update=464` 进入 `3m,vis0.20`。
+  - `update=754` 进入 `3m,vis0.40`。
+  - 未进入最终 `3m,vis0.60`。
+- 最后 10 个保存点统计：
+  - `success_rate = 0.996887 ± 0.002338`
+  - `reach_3m = 0.999265 ± 0.000601`
+  - `final_target_detectable = 0.998244 ± 0.002047`
+  - `visibility_episode_invisible_steps = 264.591 ± 6.793`
+  - `visibility_episode_max_loss_steps = 120.250 ± 1.685`
+  - `visibility_episode_over_horizon_steps = 7.083 ± 1.112`
+  - `visibility_episode_recovery_rate_within_horizon = 0.901056 ± 0.008220`
+- 指标解释已同步到 findings：
+  - `invisible_steps` 是累计不可见步数。
+  - `over_horizon_steps` 是连续不可见超过 `H=150` 后的严重尾部，不等同于累计不可见步数。
+- 决策：冻结该 checkpoint 为 `B0: current vis-reward tracking baseline`。它适合作为后续 LiDAR rollout 和风险模型数据采集的 nominal strong-tracking teacher。
+- 阶段状态更新：
+  - 第 6.2 中“visibility-aware teacher 训练/筛选”标记为完成。
+  - 第 6.2 中“在冻结 B0 上重新跑 LiDAR rollout export + label summary”和“dataset manifest”保持待办。
+
+## 2026-05-23（Warp LiDAR 动态 target mesh stale bug 修复与清理）
+- 根因确认：动态 pursuit 中 reward/exporter 的几何 visible/detectable 使用当前 `target_state`，但 Warp LiDAR raycast/semantic 使用未同步的旧 target mesh，导致 `detectable=True && target_pixel_count=0` 大量出现。
+- 修复范围收窄：
+  - 保留唯一 core fix：`EnvManager.render_sensors()` 在 `robot_manager.capture_sensors()` 前对 Warp env 做 mesh sync/refit。
+  - 删除辅助诊断代码：terminal sensor snapshot hook、LiDAR center projection helper、center-ray semantic sample、aligned-detectable/debug-only exporter 字段、静态 smoke semantic bbox 检查。
+  - 恢复 M3-like pursuit LiDAR 默认 `segmentation_camera=False`，避免长期把 debug-only semantic 输出带入主配置。
+  - 删除辅助检查产物目录：`runs/lidar_smoke/*semantic*`、`*aligned_detectable*`、`*warp_sync_aligned_detectable*` 以及对应 `/tmp/pursuit_lidar_static_semantic_debug*`。
+- 修复后诊断结论（产物已清理，摘要保留在 findings）：5 checkpoint 动态采样中 `visible|geometry=1.0`、`geom_pix0=0`，说明之前“几何可见但图像没有目标”的主因是 mesh stale，而不是 teacher 必然不可见。
+- 下一步：重新用清洁 exporter 跑冻结 B0/policy-pool rollout，重算 `target_visible_frame_rate`、`visible|detectable`、可见帧平均像素和 recovery 指标，再判断是否需要 reward/curriculum 重训。
+
+## 2026-05-23（三 agent 风险数据/模型/PPO 集成计划）
+- 启动 3 个 agent 做只读方案 review：Agent A 负责数据采集与分布覆盖，Agent B 负责风险模型与标签设计，Agent C 负责 PPO 集成与验证路线。
+- 统一结论：先把当前工作从可视化 smoke 推到正式 risk dataset，不再把 PNG/semantic image 当训练输入；正式数据只保存真实 stream 格式 `lidar_range_norm`，semantic/pixel/bbox 只作为 QA metadata。
+- 统一结论：bool 脱视野标签只作为派生量，风险模型默认训练多头输出 `p_loss_H`、`severity_H`、`first_loss_offset`、`p_recover_H`。
+- 统一结论：第一版风险模型采用离线冻结路线，先训练 K-frame CNN / CNN+GRU，再接入 frozen-risk PPO；不做 PPO 与 risk model 同步在线共训。
+- 统一结论：在线数据采用 DAgger-like aggregation，但必须混合 offline policy-pool、current risk-PPO、action noise、hard cases、scripted stress cases，避免只在新策略窄分布上继续训练。
+- 统一结论：lambda 先固定网格 `{0,0.02,0.05,0.1,0.2}` 做 scale 定标，再进入 adaptive dual lambda；约束指标使用 persistent loss / over-horizon risk。
+- 本次只更新 planning files，未修改训练、环境或 exporter 代码。
+
 ## 错误
 | 错误 | 处理 |
 |------|------|
