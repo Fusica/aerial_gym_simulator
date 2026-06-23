@@ -216,7 +216,7 @@
 | B1 | Reduced-State PPO | 降信息 | 无 | 无 |
 | B2 | Reduced-State + Heuristic Risk | 降信息 | 启发式 | 无 |
 | B3 | Reduced-State + Learned State Risk | 降信息 | 学习型 `p_lost(s_red)` | 无 |
-| B4 | Reduced-State + Risk-Modulated PPO | 降信息 | 学习型 `R_obs(s_red, u)` | 动作分布/优势估计调制（暂定） |
+| B4 | Reduced-State + Risk-Modulated PPO | 降信息 | 学习型 `R_obs(s_red, z_lidar, u)` | B4 v0：mean-baseline risk-adjusted advantage；actor/critic 主结构不改 |
 
 ## B4 内部消融注册（Deep-Research Refresh 后新增）
 
@@ -225,8 +225,8 @@
 | B4-A0 | Risk concat only | 排除“只是把风险拼进观测”的解释 | planned |
 | B4-A1 | `R_obs(s_red,u)` vs `p_lost(s_red)` | 验证动作条件性是否带来增益 | planned |
 | B4-A2 | Shuffled-action risk | 验证风险-动作配对是否真实有因果信息 | planned |
-| B4-A3 | Risk-conditioned advantage / cost-advantage | 对比 PPO 内部 loss 调制是否有效 | planned |
-| B4-A4 | Actor latent/mean/variance modulation | 对比 actor 侧调制位置 | planned |
+| B4-A3 | Risk-conditioned advantage / cost-advantage | B4 v0 主方法：`A_tilde=A_task-lambda*clip(norm(rho_exec-mean(rho_candidates)),-3,3)` | main v0 |
+| B4-A4 | Actor latent/mean/variance modulation | 对比 actor 侧调制位置；不作为 B4 v0 主方法 | ablation |
 | B4-A5 | PPO-Lagrangian using same risk as cost | 排除“只是 safe PPO/CPO 变体”的解释 | planned |
 | B4-A6 | Shield/filter using same risk post-hoc | 排除“只是动作过滤/投影”的解释 | planned |
 | B4-A7 | Privileged critic baseline | 排除“只是 asymmetric actor-critic/privileged learning”的解释 | planned |
@@ -234,7 +234,8 @@
 | B4-A9 | Adaptive dual lambda | 对比约束式 lambda 是否比固定 lambda 更稳 | planned |
 | B4-A10 | No DAgger aggregation vs DAgger-like aggregation | 验证在线聚合是否改善当前策略分布偏差 | planned |
 | B4-A11 | Frozen-risk PPO vs synchronous risk/PPO update | 验证同步共训是否引入闭环偏差；默认不作为主线 | planned |
-| B4-A12 | Candidate-action branch/ranking | 验证 action-conditioned 风险不是状态风险伪装 | planned |
+| B4-A12 | Candidate-action branch/ranking | 验证 action-conditioned 风险不是状态风险伪装；离线 `M_train=16` 含 roll/pitch/yaw/thrust 扰动 | planned |
+| B4-A13 | Mean baseline vs minimum baseline | 验证 mean baseline 是否比 minimum 更少引入保守 shield/filter 偏差 | planned |
 
 ## 风险模型时序结构注册
 
@@ -251,7 +252,7 @@
 
 | 数据集 ID | 描述 | 输入 | 标签 | QA | 状态 |
 |---|---|---|---|---|---|
-| D0-ladder-v1 | policy-pool 离线数据集，来自多阶段 checkpoint ladder | `lidar_range_norm`、deployable `ego_obs`、history action、behavior policy stats | `p_loss_H`、`severity_H`、`first_loss_offset`、`p_recover_H` | semantic-geometry alignment、detectable-pixel consistency、source/tier coverage | planned |
+| D0-ladder-v1 | policy-pool 离线数据集，来自多阶段 checkpoint ladder | `lidar_range_norm`、deployable `ego_obs`、history action、behavior policy stats | `p_loss_50/severity_50/first_loss_50/p_loss_150/severity_150/p_recover_150` | semantic-geometry alignment、detectable-pixel consistency、source/tier coverage | planned |
 | D1-risk-ppo-v1 | R0 frozen-risk PPO 在线聚合数据 | 同 D0，额外记录 risk score、lambda、candidate action metadata | 同 D0 | coverage shift、hard-case density、false-safe replay | planned |
 | D2-risk-ppo-v2 | R1 后第二轮聚合数据 | 同 D1 | 同 D0 | 与 D0/D1 split-by-source 去泄漏 | planned |
 

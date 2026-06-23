@@ -13,8 +13,10 @@ wandb/
 runs/
 
 .vscode/
+.idea/
 .codex/
 .claude/
 .agents/
 
 paper/main.pdf
+.understand-anything/

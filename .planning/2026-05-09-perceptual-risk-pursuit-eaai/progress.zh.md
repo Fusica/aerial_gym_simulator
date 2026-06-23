@@ -86,6 +86,62 @@
 - **阶段：** 第 6.2 阶段——策略池构建与风险数据采集
 - **总体状态：** active
 
+## 2026-06-01（schema7 首版数据集逐步图像/真值对齐审计）
+- 审计对象：`runs/risk_dataset/PE_20260520_110828_ladder_v1_500ep_schema7`。
+- 初步读取 `manifest.json` / `index.jsonl` / `metadata.npz` / `lidar_chunk_*.npz`，确认 schema7 保存：
+  - 每步训练输入 range image：`lidar_range_norm`，chunked `.npz`，每 chunk 默认 16 帧。
+  - 每步真值审计状态：`label_robot_state`、`label_target_state`、`label_relative_position_body`、`relative_distance`。
+  - 每步图像侧 semantic 统计：`target_pixel_count`、`target_bbox_xyxy`、`target_centroid_uv`、`target_visible`。
+- 代码口径：range image 采集发生在 `envs.step(actions)` 之前的 `*_before` 状态，done=True transition 被丢弃，只在 terminal metadata 里记录；因此非终止帧应按 `s_t / lidar_t / action_t / reward_t+1` 对齐。
+- 传感器投影口径：M3-like LiDAR 为 `501 x 2401`，水平 `[-60, 60] deg`，垂直 `[-12.5, 12.5] deg`，ray order 是从 max angle 到 min angle；sensor pose 相对机体为 `[0.10, 0.0, 0.03]`、无旋转。
+- 全量 metadata 审计结果：
+  - 覆盖 `500` 个 episode、`730020` 个非终止 step。
+  - `label_robot_state/label_target_state` 重算 `label_relative_position_body` 最大绝对误差 `1.14e-4 m`。
+  - 按 M3-like LiDAR 参数重新投影得到的 in-frustum mask 与 `label_detectable` 错配数为 `0`。
+  - 所有 episode 的 `step` 序列连续，所有 metadata chunk frame count 与 step 数一致。
+  - 全量逐 chunk 读取 `step` 数组检查 `45834` 个 `lidar_chunk_*.npz`，坏例 `0`。
+- 图像侧 semantic 对齐结果：
+  - `label_detectable=True` 帧：`333440`。
+  - `target_visible=True`（`target_pixel_count >= 3`）帧：`340467`。
+  - `detectable & visible`：`333132`；`detectable & !visible`：`308`；`visible & !detectable`：`7335`。
+  - `visible_given_detectable = 0.999076`。
+  - hard mismatch gate（`detectable` 且 `relative_distance <= 30m` 且 visible pixels < 3）：eligible `184073`，mismatch `0`。
+  - 在 `visible & detectable` 帧内，投影中心到 semantic centroid 的 L2 误差：median `0.207 px`、p95 `1.50 px`、p99 `3.27 px`；投影中心到 bbox 的距离：p99 `0.056 px`、max `1.08 px`。
+- 解释：
+  - `visible & !detectable` 多为边界帧：目标中心略出 FOV，但机体/桨叶仍打到边缘像素；这是几何中心标签比真实 mesh segmentation 更严格，不是状态/图像错位。
+  - `detectable & !visible` 共 `308` 帧，距离中位数约 `101m`、95 分位约 `147m`，且 `30m` 内 hard mismatch 为 `0`；这些主要是远距稀疏小目标回波低于 `3` 像素阈值。
+- 实际 range chunk 抽样：
+  - 抽样 `260` 帧，打开实际 `lidar_range_norm`；visible bbox 样本 `230`，step 对齐坏例 `0`。
+  - bbox 内最小 range 减投影中心距离的中位数 `-0.245m`、p95 `-0.020m`、绝对 p95 `0.294m`，符合 target 表面比 target root/center 更近的预期。
+
+## 2026-06-01（branch pilot `upd1300_h150` 审计）
+- 审计对象：`runs/risk_dataset/branch_pilot_upd1300_h150`。
+- 采集规模：`2` 个 source episodes，`16` 个 anchors，每个 anchor `8` 个候选动作，`branch_horizon=150`，`persist_steps=10`。
+- manifest 状态：`status=complete`，`dataset_mode=branch`，`same_state_action_branching=branch_mvp_same_anchor_candidate_actions`。
+- anchor 覆盖：
+  - `branch_visible_anchor_rate = 1.0`。
+  - `branch_detectable_anchor_rate = 1.0`。
+  - source steps：episode 0 为 `[125,275,375,400,425,450,475,500]`；episode 1 为 `[125,275,425,575,600,625,650,675]`。
+- candidate action 检查：
+  - 每个 anchor 均包含 `policy_mean`、`policy_sample_0`、`roll_pos/neg`、`pitch_pos/neg`、`yaw_pos/neg`。
+  - 所有 candidate action 均在 `[-1,1]`，无完全重复行。
+  - 全局 pairwise L2：mean `0.778`，p50 `0.750`，p95 `1.761`，max `2.378`。
+  - caveat：部分 anchor 因动作接近饱和，若干扰动被 clamp 后非常接近 policy mean；例如 anchor 8/9 有 10 个 pairwise action 距离 `<0.05`。
+- branch label 检查：
+  - `label_visible_history_lengths` 全部为 `150`。
+  - `label_first_done_offset_h` 全部为 `-1`，说明 pilot 中没有候选分支提前 done。
+  - `branch_label_separated_anchors = 14/16`，`branch_label_separation_rate = 0.875`。
+  - binary `label_loss_prob_h` 有分离的 anchor 只有 `1/16`；其余分离主要来自 `label_loss_severity_h` 和少量 `first_loss_offset` 差异。
+  - `candidate_severity_range_mean = 0.0383`，max `0.1133`；`candidate_first_loss_offset_range_mean = 2.375`，max `31`。
+- anchor 图像/状态对齐：
+  - 16 个 anchor 的真值投影中心全部落入 semantic bbox。
+  - 投影中心到 semantic centroid 的 L2 误差：mean `0.168 px`，p95 `0.312 px`，max `0.417 px`。
+  - bbox 内最小 range 减投影中心距离：mean `-0.252m`，p95 `-0.207m`，符合 target surface 比 root/center 更近。
+- 判断：
+  - pilot 证明 branch 采集链路、anchor 图像/状态对齐、候选动作标签保存和基础 QA gate 可用。
+  - 但当前 artifact 不保存每个候选分支的逐步 state 序列，只保存 anchor 状态、anchor LiDAR 和聚合 label；因此“每一步 state delta 连续合理”无法仅从保存数据完全复核，只能由代码路径和 label 长度/无 done 间接支持。
+  - 建议下一步不是直接最终全量冻结，而是先做中等规模、多 checkpoint branch 采集，并补一个小型 `branch trace` 调试审计（保存少数 anchor 的 candidate rollout 中 `relative_distance/target_pixel_count/state_delta` 序列）后再放大。
+
 ## 关键判断
 - 论文不做通用 pursuit RL、通用部分可观测、目标轨迹预测或完整 bilateral self-play。
 - 当前唯一强主线是 `LiDAR/range-image 降信息 + 动作条件可观测性风险 + 风险调制 PPO`。
@@ -536,6 +592,141 @@
 - 统一结论：在线数据采用 DAgger-like aggregation，但必须混合 offline policy-pool、current risk-PPO、action noise、hard cases、scripted stress cases，避免只在新策略窄分布上继续训练。
 - 统一结论：lambda 先固定网格 `{0,0.02,0.05,0.1,0.2}` 做 scale 定标，再进入 adaptive dual lambda；约束指标使用 persistent loss / over-horizon risk。
 - 本次只更新 planning files，未修改训练、环境或 exporter 代码。
+
+## 2026-05-24（schema7 semantic-visible dataset exporter 与 QA 审计闭环）
+- 修复 formal LiDAR rollout exporter 的 sensor/state 时序风险：在 `envs.step(actions)` 前 clone 当前 step 的 `depth_range_pixels` 与 `segmentation_pixels`，避免 sensor tensor 被 step 后原地刷新造成 `state_t` 对齐到 `sensor_{t+1}`。
+- 将正式风险标签从 privileged geometry detectable 改为 sensor-space semantic-visible：
+  - `label_source = semantic_target_pixel_count`。
+  - `--label-min-visible-pixels` 参数化，默认 `3`。
+  - `target_visible = target_pixel_count >= 3`，并由该序列生成 `label_loss_prob_h*`、`label_loss_severity_h*`、`label_first_loss_offset_h*`、`label_recovery_h*`。
+  - `label_detectable` 保留为 QA/audit metadata，不再作为 risk-model 训练输入。
+- 将输出 schema 升级到 `OUTPUT_SCHEMA_VERSION = 7`，manifest 明确记录：
+  - training inputs：`lidar_range_norm`、deployable `ego_obs`、`prev_action`、`behavior_action`、`policy_mean/std`。
+  - label-only / leakage-excluded fields：`label_*`、`target_*`、`relative_distance`、`reward`、`terminal_*` 等。
+- 新增独立 semantic audit 脚本 `audit_pursuit_lidar_semantics.py`，不把可视化审计继续塞进 formal exporter：
+  - 每帧保存 `range/*.jpg`、`target_mask/*.jpg`、`overlay/*.jpg`。
+  - 每帧保存 `target_pixels/*.npz`，包含目标像素 rows/cols、bbox、centroid、pixel count。
+  - 默认使用 `update=1300`，默认完整单 episode 上限 `3600` step，保存到 episode done 或 `--stop-distance-m=3.0`。
+- 完成 `upd_1300` full-episode semantic audit：
+  - 943 帧，从约 `69m` 追近到保存帧 `3.06m`，step 后 terminal 距离 `2.95m`，`terminal_done_reason=success`。
+  - `visible_frames=617`，`detectable_frames=617`。
+  - `visible_not_detectable=0`，`detectable_not_visible=0`。
+  - 943 个 `range`、943 个 `target_mask`、943 个 `overlay`、943 个 `target_pixels` 文件齐全。
+  - 逐帧核对 `frames.jsonl` 与 `target_pixels/*.npz`：pixel count、bbox、centroid 均一致，`errors=0`。
+- 低像素阈值审计结论：
+  - `1 <= target_pixel_count < 3` 的帧数为 `0`。
+  - `target_pixel_count < 3` 的 326 帧全部是 `0` 像素，平均距离 `80.97m`，中位距离 `82.70m`。
+  - 因此当前 `>=3 pixels` 阈值没有丢掉任何真实 semantic 可见帧，只过滤未来可能出现的孤立 1-2 像素噪声。
+- QA 语义澄清：
+  - `--qa-mode pilot` 不要求已有 baseline；若传 `--qa-baseline-output`，会在本次 rollout 完成后由 `index.jsonl` 生成 schema7 QA baseline。
+  - `--qa-mode collect` 才会要求 `--qa-baseline-path`，并在 rollout 前检查 baseline schema 与 selected updates 覆盖。
+  - policy-pool checkpoint 缺失与 QA baseline 缺 update 是两类错误：前者来自 `policy_pool/manifest.jsonl`，后者来自 QA baseline JSON。
+  - LiDAR finite stats 当前只记录 `lidar_finite_fraction_min/mean`、`lidar_norm_min/max`，用于发现 NaN/Inf 或明显数值异常；尚未作为 hard gate。
+- 验证通过：
+  - `git diff --check`
+  - `conda run -n aerialgym_v2 python -m py_compile aerial_gym/rl_training/cleanrl/export_pursuit_lidar_rollouts.py aerial_gym/rl_training/cleanrl/audit_pursuit_lidar_semantics.py`
+  - exporter 3-step smoke：schema7 metadata 写出 `label_source=semantic_target_pixel_count`、`label_min_visible_pixels=3`。
+  - audit 3-frame smoke：range/mask/overlay/target_pixels/frames.jsonl/summary.json 全部写出。
+- 当前状态：semantic 提取、帧内 sensor/state 对齐、schema7 label 口径已通过 full-episode audit；下一步可以启动 `500 episode` schema7 pilot rollout，并生成新的 `qa_baseline_schema7.json`。
+
+## 2026-06-01（三 teacher branch pilot 与 binary separation 提升）
+- 修改 `export_pursuit_lidar_rollouts.py` 的 branch dataset 逻辑：
+  - 新增 `--branch-updates`，支持一次采集多个 teacher checkpoint；实际采用单个 Isaac/Warp env 内顺序切换 checkpoint，避免同一进程重复创建 Isaac Gym simulation 导致 segfault。
+  - 新增 `--branch-anchor-mode risk_edge`，按低 target pixel / bbox 靠近 range image 边界优先选择 anchor；不改变 source PPO 执行语义。
+  - 新增候选 action 去重与补样：`--branch-min-candidate-action-l2`、roll/pitch/yaw/thrust 单轴扰动、policy sample、必要时 uniform fallback；候选动作仍只执行单步，随后 teacher 接管。
+  - 新增 `--branch-save-trace` 轻量审计 trace，只保存前若干 anchor 的 robot/target position、relative distance、target pixel count，不作为训练输入。
+- 采集命令：
+  - `conda run -n aerialgym_v2 python aerial_gym/rl_training/cleanrl/export_pursuit_lidar_rollouts.py --dataset-mode branch --branch-updates 220 610 1300 --branch-episodes 2 --branch-candidates 12 --branch-horizon 150 --branch-anchor-mode risk_edge --branch-anchor-stride 25 --branch-max-anchors 8 --branch-min-candidate-action-l2 0.08 --branch-risk-anchor-min-score 0.25 --branch-save-trace --branch-trace-max-anchors 6 --output-dir runs/risk_dataset/branch_pilot_3upd2ep_h150_edge_v1 --overwrite`
+- 输出：
+  - `runs/risk_dataset/branch_pilot_3upd2ep_h150_edge_v1`
+  - `manifest.status=complete`
+  - anchors=`48`，updates=`{220:16, 610:16, 1300:16}`
+- separation 结果：
+  - `branch_label_separated_anchors=36/48 = 0.75`
+  - `branch_binary_loss_separated_anchors=14/48 = 0.2917`
+  - per update binary：`upd220=6/16`，`upd610=8/16`，`upd1300=0/16`
+  - 相比上一版 `branch_pilot_upd1300_h150` 的 binary `1/16`，绝对数量从 `1` 提高到 `14`，比例从 `6.25%` 提高到 `29.17%`。
+- action diversity：
+  - 候选动作无越界、无 exact duplicate。
+  - pairwise L2 min：mean=`0.1652`，min=`0.08125`；满足本次 `0.08` 最小距离设置。
+  - pairwise L2 mean：mean=`1.1127`。
+- 图像/状态对齐审计：
+  - metadata 和 anchor LiDAR 文件均存在，缺失数为 `0`。
+  - 状态投影中心落入 semantic bbox：`47/48`；唯一例外为底部边界裁剪帧，bbox 紧贴图像底边，投影点在图像外约 `2 px`。
+  - 投影到 semantic centroid 的误差：mean=`0.414 px`，p95=`0.709 px`，max=`7.008 px`（来自上述边界裁剪帧）。
+  - bbox 内最小 LiDAR range 与状态中心距离差：mean=`-0.326 m`，p95=`-0.245 m`，max=`0.032 m`，符合目标表面比中心略近的预期。
+- trace 连续性审计（前 6 个 anchor，12 candidates each）：
+  - trace length 与 visible-history length 完全一致。
+  - 无 NaN/Inf，无 offset 断裂，无大跳变候选。
+  - per-step 最大变化：robot position `0.0919 m`，target position `0.0269 m`，relative distance `0.0946 m`。
+- 验证通过：
+  - `conda run -n aerialgym_v2 python -m py_compile aerial_gym/rl_training/cleanrl/export_pursuit_lidar_rollouts.py`
+  - `git diff --check`
+
+## 2026-06-01（B4 v0 方法核心与工程契约定型）
+- 本轮结论：当前没有剩余 open question 阻塞第 6.3 风险头或第 6.4 B4 实现；后续替代方案进入 ablation，不再改变第一版主方法。
+- 风险接口定型：
+  - `s_red = [body_linvel(3), body_angvel(3), rotation_matrix(9), prev_action(4)]`，共 19 维。
+  - `z_lidar = 64`，由 `K=3` 帧 LiDAR range-image/point features stack 压缩得到。
+  - `u = [c,p,q,r]` 为实际候选/执行 CTBR 动作；risk head 拼接 `u`、`u-prev_action`、`abs(u)`、`u^2`。
+  - 不使用 `policy_mean` 作为 risk head 的 `u_ref`；`policy_mean/std` 只保留为 metadata、候选生成和 OOD/诊断字段。
+- 风险输出定型：
+  - PPO v0 使用 `p_loss_50`、`severity_50`、`p_loss_150`、`severity_150`。
+  - `first_loss_50` 和 `p_recover_150` 只作为辅助训练/诊断头，不作为 PPO v0 在线输入。
+  - PPO 风险标量：`rho = 0.40*p_loss_50 + 0.35*severity_50 + 0.15*p_loss_150 + 0.10*severity_150`。
+- PPO 融合定型：
+  - 使用 mean baseline：`rho_bar(o)=mean_i rho(o,u_i)`。
+  - `delta_risk = rho(o,u_exec)-rho_bar(o)`。
+  - `A_tilde = A_task - lambda * clip(norm(delta_risk), -3, 3)`。
+  - 第一轮 `lambda` 固定网格 `{0,0.02,0.05,0.1,0.2}`，推荐起点 `0.05`。
+- actor/critic 契约：
+  - actor 第一版保持原 PPO Gaussian/tanh CTBR 分布；不采用连续动作分布重塑 `pi(u|o) exp(-beta rho)`。
+  - critic 第一版保持 `V_task`；risk value head 仅作为 logging/adaptive-lambda ablation，不是 B4 v0 必需项。
+  - risk encoder/head 离线预训练后 frozen/stop-gradient；不在同一 PPO rollout 中同步更新。
+- 候选动作契约：
+  - 用户确认采用 mean baseline，并同意加入 thrust 扰动。
+  - 离线 branch 训练默认 `M_train=16`，包含 roll/pitch/yaw/thrust 单轴正负扰动、policy/local sample 和 fallback 补样，并用最小 L2 diversity check 防止 clamp 后重复。
+  - PPO 在线风险 baseline 默认 `M_ppo=8`；thrust 候选优先用于离线训练覆盖，在线加入作为 ablation。
+- planning 同步：
+  - 第 3 阶段由 `in_progress` 更新为 `complete`。
+  - `decision_log.zh.md` 新增 D046-D048，并将 I003 从未定型改为已定型。
+  - `task_plan.zh.md`、`findings.zh.md`、`experiment_registry.zh.md` 同步 B4 v0 公式、风险头输入输出、候选动作和 ablation 边界。
+
+## 2026-06-02（rollout artifact 对 B4 v0 契约的代码检查与最小补齐）
+- 按 B4 v0 契约审计 `aerial_gym/rl_training/cleanrl/export_pursuit_lidar_rollouts.py`：
+  - behavior dataset 已能保存 `lidar_range_norm`、19D `ego_obs`、`prev_action`、`behavior_action`、`label_loss_prob_h050/h150`、`label_loss_severity_h050/h150`、`label_first_loss_offset_h050`、`label_recovery_h150`，可支持 `RiskHead(s_red,z_lidar,u)` 的行为数据训练。
+  - 发现 branch artifact 缺口：anchor 只保存单帧 `anchor_lidar`，不能直接形成 B4 v0 需要的 `K=3` LiDAR stack；branch metadata 也只保存一个泛化 horizon 标签，未显式保存 `h050/h150` 和 recovery 辅助标签。
+- 最小代码修改：
+  - 新增 `--risk-lidar-stack-frames`，默认 `3`。
+  - branch mode 在 source env 上维护 anchor LiDAR history，并将 `anchor_lidar.npz/lidar_range_norm` 写成 `(K,H,W)`；不足 K 帧时用最早可用帧前填充。
+  - branch metadata 新增 `branch_label_horizons`、`label_loss_prob_h*`、`label_loss_severity_h*`、`label_first_loss_offset_h*`、`label_valid_h*`、`label_recovery_h*`、`label_recovery_valid_h*`。
+  - branch 默认 `--branch-horizon` 从 `50` 改为 `150`，默认 `--risk-horizons 50 150 300` 时会为 branch 保存 `h050/h150`。
+  - manifest 新增 `risk_model_contract`，并将 `policy_mean/std` 从 `training_inputs` 移到 `diagnostic_metadata_fields`，避免和“policy mean 不作为 u_ref”契约冲突。
+- 验证通过：
+  - `conda run -n aerialgym_v2 python -m py_compile aerial_gym/rl_training/cleanrl/export_pursuit_lidar_rollouts.py`
+  - `git diff --check`
+  - branch dry-run：`--dataset-mode branch --branch-update 1300 --branch-candidates 16 --branch-horizon 150 --risk-horizons 50 150`
+  - helper assertion：`branch_horizon_label_payload` 与 `lidar_stack_from_history` 输出符合预期。
+  - runtime smoke：`/tmp/risk_export_contract_branch_smoke` 写出 1 个 branch anchor，`anchor_lidar.npz/lidar_range_norm` 形状为 `(3,501,2401)`，metadata 包含 `label_loss_prob_h005`、`label_loss_severity_h005`、`label_first_loss_offset_h005`、`label_recovery_h005`、`label_valid_h005`，manifest 的 `training_inputs` 不包含 `policy_mean`。
+
+## 2026-06-03（6.3 风险模型第一版训练代码实现：CNN+GRU + 辅助头）
+- 新增离线风险模型代码：
+  - `aerial_gym/rl_training/cleanrl/risk_model.py`：实现 `RiskNet_CNN_GRU_v1`，LiDAR `K=3` stack 先经 CNN frame encoder 和 GRU 得到内部 `z_lidar=64`；`s_red` 与 `u, u-prev_action, abs(u), u^2` 在 fusion MLP 中直接融合，不经过 LiDAR encoder。
+  - 输出头：`p_loss_50`、`severity_50`、`first_loss_50`、`p_loss_150`、`severity_150`、`p_recover_150`；其中 `first_loss_50` 和 `p_recover_150` 为辅助头，不作为 B4 v0 PPO 在线输入。
+  - 风险标量保持 B4 v0 契约：`rho = 0.40*p_loss_50 + 0.35*severity_50 + 0.15*p_loss_150 + 0.10*severity_150`。
+- 新增数据与训练入口：
+  - `risk_dataset.py` 支持 schema7 behavior dataset 的逐步样本和 branch dataset 的 same-anchor candidate-action 样本；branch batch 会展开为 `B*M`，并保留同 anchor `group_ids` 用于 pairwise ranking。
+  - `train_pursuit_risk_model.py` 支持 `behavior_pretrain` 与 `branch_finetune` 两个 stage，但使用同一套网络结构；branch 微调可选择先冻结 LiDAR backbone 若干 epoch，再端到端解冻。
+  - `plot_pursuit_risk_training.py` 输出 `Figure_1_loss.png` 和 `Figure_2_risk_quality.png`。
+  - 训练不再增加 `.sh` 包装脚本；后续直接使用 `python aerial_gym/rl_training/cleanrl/train_pursuit_risk_model.py ...` 运行，避免 shell 参数封装与真实训练入口分离。
+- 验证通过：
+  - `conda run -n aerialgym_v2 python -m py_compile aerial_gym/rl_training/cleanrl/risk_model.py aerial_gym/rl_training/cleanrl/risk_dataset.py aerial_gym/rl_training/cleanrl/train_pursuit_risk_model.py aerial_gym/rl_training/cleanrl/plot_pursuit_risk_training.py`
+  - behavior CPU smoke：`max_samples=2`，可从 `PE_20260520_110828_ladder_v1_500ep_schema7` 读取 raw LiDAR stack、`s_red`、`behavior_action`、50/150 标签并完成一次训练/验证。
+  - branch CPU smoke：`max_samples=2`，可从 `branch_contract_pilot_3upd2ep_h150_k3_v1` 读取 same-anchor `M=16` candidates，并产生 `ranking_pairs=88` 的 ranking validation 指标。
+  - plot smoke：`/tmp/risk_plot_smoke/Figure_1_loss.png` 与 `/tmp/risk_plot_smoke/Figure_2_risk_quality.png` 成功生成。
+- 当前限制：
+  - 这只是 6.3 第一版代码闭环，不代表风险模型已达到可接入 PPO 的性能门槛；仍需完整 branch/full behavior 训练、校准、false-safe rate、heldout checkpoint/source 泛化验证。
+  - Stage 6.3-A 的纯 state-risk/CNN baseline 尚未单独实现；当前第一版按用户要求直接采用 action-conditioned CNN+GRU 主结构。
 
 ## 错误
 | 错误 | 处理 |

@@ -13,10 +13,10 @@
 - **当前写作模板规则：** 论文草稿先使用 `paper/main.tex` 中的 `IEEEtran` / IEEE Transactions 双栏模板撰写和编译；当前阶段不再寻找、安装或切换 `elsarticle.cls`。EAAI/Elsevier 官方模板只在投稿前最终格式化阶段再处理。
 - **当前有效 deep-research：** `deep-research-output/perceptual-risk-modulated-ppo-eaai-refresh/`。
 
-## 暂定 EAAI 主线声明
+## EAAI 主线声明
 通过特权全状态 rollout 学习动作条件短期可观测性风险，并用该风险调制 PPO 的动作分布与优势估计，可以让 UAV 追逐者在 LiDAR/range-image 传感器代理降信息条件下恢复高速、大空间追逐决策质量。
 
-> 注：该方向为当前暂定主线，具体 actor/critic 结构、risk loss 和 advantage 组合方式后续继续优化，不在当前阶段定型。
+> 2026-06-01 定型：B4 第一版采用 **counterfactual risk-adjusted advantage PPO**。风险模型离线训练并冻结，PPO actor 输出分布和 critic 主 value 第一版不改；动作条件风险只通过 mean-baseline 的 advantage 修正进入 PPO actor loss。actor latent/mean/variance modulation、risk value critic、policy distribution reweighting 只作为后续 ablation，不作为 B4 v0 主方法。
 
 ## 不可妥协的贡献
 1. **LiDAR/range-image 传感器代理降信息追逐定义**
@@ -32,9 +32,9 @@
 
 3. **动作条件风险调制 PPO**
    - PPO 仍直接输出归一化 CTBR 动作 `u_rl = [c, p, q, r]`，并由该动作进入环境执行链路。
-   - B4 暂定为用 `R_obs(s_red, u)` 或其风险特征调制 PPO 的 actor 分布、critic/risk value 或 advantage 估计。
+   - B4 v0 使用 `R_obs(s_red, z_lidar, u)` 形成 `rho(o,u)`，并用同状态候选动作风险的 mean baseline 修正 PPO advantage。
    - 风险模型不是简单 observation concat，也不是 PPO 后处理；它应作为结构化调制信号进入策略学习。
-   - 论文 1 暂不锁定具体调制形式。
+   - 论文 1 主方法不采用连续动作策略分布重塑 `pi(u|o) exp(-beta rho)`；该路线工程风险高，保留为后续 ablation/讨论。
 
 ## 仓库事实
 - 当前配置：`aerial_gym/config/task_config/pursuit_guidance_task_config.py`。
@@ -94,26 +94,44 @@
 - 必须做 `H in {100, 150, 200}` 以及至少一组 FOV/range 扰动敏感性分析。
 
 ### LiDAR 与风险模型
-- 输入：自身线速度、自身角速度、姿态、上一时刻 CTBR 动作、`K = 3` 帧 LiDAR range-image/point features stack。
-- 冻结 latent：`z_lidar = 64`。
-- 输出：`p_lost(s_red)` 和动作条件风险 `R_obs(s_red, u)`。
+- 输入：`s_red`、`z_lidar` 和候选/执行动作 `u`。
+  - `s_red = [body_linvel(3), body_angvel(3), rotation_matrix(9), prev_action(4)]`，共 19 维。
+  - `z_lidar = 64`，由 `K = 3` 帧 LiDAR range-image/point features stack 经 CNN/CNN+GRU 压缩得到；64 维是第一版默认 latent，后续可做 `32/64/128` ablation。
+  - `u = [c,p,q,r] in [-1,1]^4` 是实际候选动作或 PPO 执行动作，不把 `policy_mean` 当作 `u_ref` 输入。
+- risk head 实际输入特征：`concat(s_red, z_lidar, u, u-prev_action, abs(u), u^2)`；`policy_mean/std` 只作为 metadata、候选生成和 OOD/诊断字段，不作为风险头核心输入。
+- 输出：动作条件风险 `R_obs(s_red, z_lidar, u)`，第一版多头为：
+  - PPO v0 使用：`p_loss_50`、`severity_50`、`p_loss_150`、`severity_150`。
+  - 训练/诊断辅助：`first_loss_50`、`p_recover_150`；这两个不作为 PPO v0 在线输入。
 - 训练期辅助输出：由特权监督得到的 range/bearing。
 - 推理期规则：无目标真实值、无墙体真实值、无障碍物真实值、无真实值衍生 bearing/range/closing-speed。
 - 在线输入真实性规则：`s_red`、`z_lidar`、risk head 和 PPO 风险调制分支不得使用目标 ID、真值 target-hit、仿真语义真值或人工 mask；若未来使用 target-hit/mask/bbox，必须建模为真实 LiDAR 聚类/跟踪器或 detector 输出，并加入漏检、误检、延迟和噪声。
 - 锁定 LiDAR/target 设置：论文 1 主线固定使用 `target_x500 + PursuitForwardM3_120x25_UltraHighResLidarConfig`（M3-like 前向高分辨率配置）。静态 smoke 已验证 `target_x500 + M3-like` 在 50m 有 12 个有效返回点，100m/150m/200m 均保留 2 个目标返回点；该组合作为风险模型和可见性几何的强制实验约束。
 
-### 风险调制 PPO（暂定方向）
+### 风险调制 PPO（B4 v0 定型）
 PPO 仍是控制策略主体，直接输出归一化 CTBR 命令：
 
 `u_rl = [c, p, q, r] in [-1, 1]^4`
 
-B4 将动作条件可观测性风险作为结构化调制信号融入 PPO：
+B4 v0 将动作条件可观测性风险作为结构化调制信号融入 PPO advantage：
 
-- actor 侧：风险特征可调制动作均值、方差或中间 latent；
-- critic 侧：可增加 task value 与 risk value 的联合估计；
-- advantage/loss 侧：可用可观测性风险修正 advantage 或加入风险正则项。
+- 风险标量：
+  - `rho(o,u) = 0.40*p_loss_50 + 0.35*severity_50 + 0.15*p_loss_150 + 0.10*severity_150`。
+- 同状态候选风险 baseline：
+  - `rho_bar(o) = mean_i rho(o,u_i)`，主方法使用 mean，不使用 minimum。
+  - minimum baseline 只作为 ablation，因为它会把所有非最低风险动作都扣分，容易变成保守 shield/filter。
+- PPO advantage 修正：
+  - `delta_risk = rho(o,u_exec) - rho_bar(o)`。
+  - `A_tilde = A_task - lambda * clip(norm(delta_risk), -3, 3)`。
+  - 第一轮固定 `lambda in {0, 0.02, 0.05, 0.1, 0.2}`，推荐起点 `lambda=0.05`。
+- actor/critic 契约：
+  - actor 第一版仍输出原 PPO Gaussian/tanh CTBR 分布，不做连续动作分布重塑。
+  - critic 第一版仍估计 `V_task`，不强制增加 risk value head；risk value head 只作为 logging/adaptive-lambda ablation。
+  - risk encoder/head offline pretrain 后 frozen/stop-gradient；不在同一 PPO rollout 中同步更新。
 
-上述三类融合方式是后续优化空间，当前只锁定“风险调制 PPO”方向，不锁具体网络结构和公式。
+候选动作集合：
+- 离线 branch 训练默认 `M_train = 16`，覆盖 policy sample、roll/pitch/yaw/thrust 单轴正负扰动、局部 Gaussian/必要时 uniform fallback，并使用最小 L2 diversity check；`policy_mean` 可以作为候选动作或诊断锚点，但不能作为风险头 reference 输入。
+- PPO 在线风险 baseline 默认 `M_ppo = 8`，包含 `u_exec`、额外 policy/local sample、`roll±`、`pitch±`、`yaw±`；thrust 扰动优先用于离线训练覆盖，在线是否加入作为后续 ablation。
+- 每个候选动作只执行第一步，随后由 teacher/current policy 接管 horizon rollout；风险语义是单步动作条件短期风险，不是连续 hold 3/5 step 的动作风险。
 
 执行链路保持为：
 
@@ -130,6 +148,7 @@ B4 必需内部对照：
 - `R_obs(s_red,u)` vs `p_lost(s_red)` vs shuffled-action risk
 - risk-conditioned advantage / cost-advantage
 - actor latent/mean/variance modulation
+- mean baseline vs minimum baseline
 - PPO-Lagrangian using the same risk as cost
 - shield/filter using the same risk as post-hoc intervention
 - privileged critic baseline
@@ -159,9 +178,10 @@ B4 必需内部对照：
 
 ### 第 3 阶段：方法设计
 - [x] 锁定 `H = 150`、`K_persist = 10`、`K = 3`、`z_lidar = 64`。
-- [x] 将动作条件风险调制 PPO 暂定为主方法方向。
-- [ ] 比较 actor risk gating、risk value/critic、risk-adjusted advantage、risk regularization 的最小实现，并确定 B4 的第一版公式和网络接口。
-- **状态：** in_progress（方向已定，细节未定型）
+- [x] 将动作条件风险调制 PPO 锁定为主方法方向。
+- [x] 比较 actor risk gating、risk value/critic、risk-adjusted advantage、risk regularization 的最小实现，并确定 B4 的第一版公式和网络接口。
+- [x] 定型 `s_red`、`z_lidar`、`u` 到 `R_obs` 的工程接口，以及 `R_obs` 进入 PPO actor/critic/advantage 的第一版路径。
+- **状态：** complete（B4 v0 工程契约已定型；后续变化进入 ablation，不再阻塞 6.3/6.4 实现）
 
 ### 第 4 阶段：实验设计
 - [x] 锁定 B0-B4。
@@ -210,29 +230,34 @@ B4 必需内部对照：
 - [ ] 同步当前权重上调后的测试和启动日志：`tests/test_curriculum_controller.py` 期望改为 `0.15/0.30/0.45`，`ppo_guidance.py` 启动文案同步为 `3m+vis0.15,3m+vis0.30,3m+vis0.45`，并重跑相关测试。
 - [x] 基于 `runs/PE_20260520_110828` 完成当前 B0 visibility-aware teacher 筛选：冻结 `policy_pool/ppo_upd_001300_step_2396160000.pth` 作为 `B0: current vis-reward tracking baseline`。
 - [x] 修复动态 Warp LiDAR target mesh stale 问题：sensor render 前同步 Warp mesh，使 geometry detectable 与 semantic/range image 回到同一帧。
-- [ ] 在 mesh-sync 修复后的冻结 B0 上重新跑 LiDAR rollout export + label summary。
-- [ ] 将 LiDAR exporter 拆成 `smoke` 与 `dataset` mode；正式 dataset mode 默认不保存 PNG。
-- [ ] 实现 `ladder_v1` checkpoint preset，覆盖弱策略、初学追近、高成功低 visibility、visibility early stage、强 visibility teacher，支持 manifest stratified 自动选择与手动覆盖。
-- [ ] 实现 risk dataset shard schema：`lidar_range_norm`、deployable `ego_obs`、history action、behavior/candidate action、policy mean/std、multi-head labels、QA metadata。
-- [ ] 实现 anchor sampling：`stride/event/stratified`，优先保存 loss/recovery/boundary/low-pixel/hard-case 窗口。
-- [ ] 实现 QA gates：semantic-geometry alignment、detectable target pixels、positive rate、tier/source coverage、leakage assertions、split-by-checkpoint/source。
+- [x] 在 mesh-sync 修复后的冻结 B0 `upd_1300` 上完成 full-episode semantic audit：943 帧从约 69m 到 terminal success，semantic visible 与 geometry detectable 均为 617 帧，两类错配均为 0。
+- [x] 将可视化 semantic 审计拆成独立脚本；正式 dataset exporter 不保存 debug PNG/JPG，只写可训练 LiDAR shard 与 metadata。
+- [x] 实现 `ladder_v1` checkpoint preset，覆盖弱策略、初学追近、高成功低 visibility、visibility early stage、强 visibility teacher，并支持手动 checkpoint override。
+- [x] 实现 schema7 risk dataset shard schema：`lidar_range_norm`、deployable `ego_obs`、history action、behavior action、policy mean/std、multi-horizon semantic-visible labels、QA metadata。
+- [x] 实现第一版 QA gates：semantic availability、semantic/geometry hard mismatch、baseline schema/update coverage、QA window jsonl、leakage manifest 声明和 LiDAR finite stats 记录。
+- [x] 完成多 teacher branch pilot，并把候选动作扩展为带 diversity check 的 roll/pitch/yaw/thrust 单轴扰动、policy sample 和 fallback 补样；thrust 扰动进入离线 branch 训练覆盖。
+- [x] 按 B4 v0 契约补齐 rollout artifact：branch anchor 保存 `K=3` LiDAR stack，branch metadata 显式保存 `h050/h150` 风险标签和 recovery 辅助标签，manifest 将 `policy_mean/std` 标为诊断元数据而非风险头输入。
+- [ ] 实现 anchor sampling：`stride/event/stratified`，优先保存 loss/recovery/boundary/low-pixel/hard-case 窗口。（2026-06-01 已完成 branch pilot 用 `risk_edge` 低像素/边界 anchor 过滤；event/stratified 正式采样仍待补。）
+- [ ] 将 LiDAR finite stats 升级为可选 hard gate，并补充 split-by-checkpoint/source 的 coverage 检查。
 - [ ] 生成 `D0 offline policy-pool` 数据集，过 QA 后冻结为 risk model 训练输入。
 - **状态：** in_progress
 
 ### 第 6.3 阶段：离线风险模型训练
-- [ ] 实现 multi-head risk label：`p_loss_H`、`severity_H`、`first_loss_offset`、`p_recover_H`，支持 `H={50,150,300}`。
+- [x] 实现 B4 v0 risk head：`RiskHead(s_red, z_lidar, u) -> {p_loss_50, severity_50, first_loss_50, p_loss_150, severity_150, p_recover_150}`。（2026-06-03：`risk_model.py`，CNN+GRU LiDAR backbone + 直接 `s_red/action` 融合）
+- [x] 训练 loss 默认权重：`BCE(p_loss_50)=1.0`、`Huber(severity_50)=1.0`、`BCE(p_loss_150)=0.7`、`Huber(severity_150)=0.7`、`Huber(first_loss_50)=0.3`、`BCE(p_recover_150)=0.3`、pairwise ranking `0.5`。
 - [ ] Stage 6.3-A：K-frame CNN state-risk baseline，验证 LiDAR/range labels 可学。
-- [ ] Stage 6.3-B：CNN encoder + GRU temporal risk model，作为默认主力结构。
-- [ ] Stage 6.3-C：action perturbation `R(o, u - policy_mean)`，先验证 action-conditioned risk 是否比 state-risk 有增益。
-- [ ] Stage 6.3-D：candidate-action ranking / branch rollout，验证模型能否区分不同候选动作的脱视野风险。
+- [x] Stage 6.3-B：CNN encoder + GRU temporal risk model，作为默认主力结构。
+- [x] Stage 6.3-C：action-conditioned `R(o,u)`，输入使用 `u, u-prev_action, abs(u), u^2`，不使用 `u-policy_mean` 作为核心 reference。
+- [ ] Stage 6.3-D：candidate-action ranking / branch rollout，验证模型能否区分不同候选动作的脱视野风险；ranking pair 仅在 `|y_i-y_j| > epsilon_rank=0.02` 时启用。（2026-06-03：ranking 训练入口和 pilot smoke 已通过；完整 branch 数据训练后的排序性能仍待验证）
 - [ ] Stage 6.3-E：Mamba/SSM temporal model 作为 GRU baseline 成立后的 creative stage；LSTM/Transformer 只做 ablation。
 - [ ] 离线训练和校准，记录 AUROC、AUPRC、Brier、ECE、false-safe rate、severity/time/recovery 指标。
 - [ ] 在 heldout checkpoint/source 上验证泛化；不允许同一 checkpoint episode 同时出现在 train/test。
-- **状态：** pending
+- **状态：** in_progress（代码入口已实现并通过小样本 smoke；完整数据训练/校准/heldout 泛化尚未完成）
 
 ### 第 6.4 阶段：降信息策略实现（B1-B4）
 - [ ] 实现 B1-B4 reduced-observation modes，并保留 B0 full-state baseline 作为上限参照。
 - [ ] 先接入 frozen risk model，不在同一 PPO rollout 中同步更新 risk model。
+- [ ] 实现 B4 v0：mean-baseline risk-adjusted advantage，actor 分布和 critic 主 value 不改，PPO logprob/ratio 对应环境实际执行动作。
 - [ ] 运行 fixed lambda grid：`{0,0.02,0.05,0.1,0.2}`，定标 risk penalty scale。
 - [ ] 在固定网格确认有效后，实现 adaptive dual lambda，约束指标使用 persistent loss / over-horizon risk。
 - [ ] 实现 DAgger-like aggregation：`D0 -> R0 -> risk PPO -> D1 -> R1`，每轮混合 offline policy-pool、current risk-PPO、action noise、hard cases、scripted stress cases。

@@ -7,6 +7,48 @@
 
 ## A. 当前置顶结论
 
+### 2026-06-01 B4 v0 工程契约定型
+- 当前没有剩余 open question 阻塞 6.3 风险头或 6.4 B4 实现；后续变化均按 ablation 处理，不再改变第一版主方法。
+- 风险模型接口定型为 `RiskHead(s_red, z_lidar, u) -> R_obs`：
+  - `s_red = [body_linvel(3), body_angvel(3), rotation_matrix(9), prev_action(4)]`，共 19 维。
+  - `z_lidar = 64`，来自 `K=3` 帧 LiDAR range-image/point features 的 CNN/CNN+GRU 压缩。
+  - 动作输入使用实际候选/执行动作 `u=[c,p,q,r]`，并拼接 `u-prev_action`、`abs(u)`、`u^2`；不把 `policy_mean` 作为 `u_ref` 或核心输入。
+  - `policy_mean/std` 只保留为 metadata、候选动作生成和 OOD/诊断字段。
+- 风险输出定型：
+  - PPO v0 使用 `p_loss_50`、`severity_50`、`p_loss_150`、`severity_150`。
+  - `first_loss_50` 与 `p_recover_150` 作为训练辅助头和诊断指标，不进入 PPO v0 在线输入。
+  - PPO 风险标量为 `rho = 0.40*p_loss_50 + 0.35*severity_50 + 0.15*p_loss_150 + 0.10*severity_150`。
+- B4 v0 PPO 融合定型为 mean-baseline risk-adjusted advantage：
+  - `rho_bar(o) = mean_i rho(o,u_i)`。
+  - `delta_risk = rho(o,u_exec) - rho_bar(o)`。
+  - `A_tilde = A_task - lambda * clip(norm(delta_risk), -3, 3)`。
+  - 第一轮 `lambda in {0,0.02,0.05,0.1,0.2}`，推荐起点 `0.05`。
+- B4 v0 actor/critic 契约：
+  - actor 输出分布不做连续动作风险重塑，不采用 `pi(u|o) exp(-beta rho)` 作为主方法。
+  - critic 第一版只保留 `V_task`；risk value head 可以用于 logging/adaptive lambda ablation，但不是 v0 必需组件。
+  - risk encoder/head offline pretrain 后 frozen/stop-gradient；不在同一 PPO rollout 中同步更新。
+- 候选动作定型：
+  - 离线 branch 训练默认 `M_train=16`，包含 roll/pitch/yaw/thrust 单轴正负扰动、policy/local sample 和必要 fallback，并使用最小 L2 diversity check。
+  - PPO 在线 risk baseline 默认 `M_ppo=8`，主集合包含 `u_exec`、额外 sample、roll±、pitch±、yaw±；thrust 扰动优先用于离线训练覆盖，在线加入作为后续 ablation。
+  - baseline 使用 mean，不使用 minimum；minimum 只作为 ablation，因为它更像保守 shield/filter，容易把追击动作压成低风险但不追击的动作。
+
+### 2026-06-01 schema7 图像/真值对齐审计口径
+- 本次审计对象为 `runs/risk_dataset/PE_20260520_110828_ladder_v1_500ep_schema7`，目标是确认每步 LiDAR 图像侧 target 统计与真值状态投影是否一致。
+- schema7 中 `metadata.npz` 已保存每步 semantic 图像统计，因此全量一致性检查优先使用 `target_pixel_count`、`target_bbox_xyxy`、`target_centroid_uv` 与真值投影比对；实际 `lidar_chunk_*.npz` 体量过大，适合作为抽样核查 step 顺序和局部 range 的二级检查。
+- 当前 exporter 的非终止帧语义是 `s_t / lidar_t / action_t / reward_t+1 / done_false`：图像、robot state、target state 都来自 `envs.step()` 之前缓存的同一帧；done=True 帧不保存为训练样本，避免 reset 后 sensor render 污染。
+- M3-like LiDAR 投影公式应遵守 Warp ray order：`u = (hmax - atan2(y,x)) / (hmax-hmin) * (W-1)`，`v = (vmax - atan2(z,sqrt(x^2+y^2))) / (vmax-vmin) * (H-1)`，其中相对位置先减去 sensor translation `[0.10, 0.0, 0.03]`。
+- 审计结论：当前首版 schema7 数据集的逐步真值状态、几何投影、semantic target 图像统计和 range chunk step 顺序整体可以对上；未发现一帧错位、reset 后图像污染或投影方向反转问题。
+- 全量证据：`730020` 个非终止 step 中，重算 `label_detectable` 与存储值 `0` 错配；`45834` 个 LiDAR chunks 的 `step` 数组与 metadata 连续 step `0` 错配；`relative_position_body` 重算最大误差约 `1.14e-4m`。
+- 图像一致性证据：`visible_given_detectable = 0.999076`；`30m` 内 hard mismatch 为 `0 / 184073`；`visible & detectable` 帧里投影中心到 semantic centroid 的 p95 约 `1.50px`、到 bbox 的 p99 约 `0.056px`。
+- 需要保留的 caveat：`visible & !detectable` 有 `7335` 帧，主要是目标中心略出 FOV 但 mesh 边缘仍被 LiDAR ray 命中；`detectable & !visible` 有 `308` 帧，主要是远距稀疏目标像素低于 `3` 像素标签阈值。这是“中心点几何标签”和“mesh/ray semantic 图像”的定义差异，不是采集错位。
+
+### 2026-06-01 branch pilot `upd1300_h150` 审计结论
+- `runs/risk_dataset/branch_pilot_upd1300_h150` 是有效的 branch MVP pilot：`16` anchors、`128` candidate-action labels、anchor visible/detectable rate 均为 `1.0`，manifest `status=complete`。
+- 多分支动作确实写出：每个 anchor 都有 `8` 个候选动作（policy mean/sample + roll/pitch/yaw 正负扰动），所有动作在 `[-1,1]`，无完全重复；全局 candidate pairwise L2 p50 约 `0.750`。
+- 多分支结果有信号但偏弱：`14/16` anchors 有 severity 或 first-loss-offset 分离，`candidate_severity_range_mean=0.0383`；但 binary loss 分离只有 `1/16` anchor。因此第一版大规模 branch 应优先利用 severity/ranking，不应只依赖二分类 `label_loss_prob_h`。
+- anchor 图像/状态可对上：16 个 anchor 的投影中心全部位于 semantic bbox 内，centroid L2 误差 max `0.417px`；bbox 内 range 与 target center distance 的差异符合“表面比中心更近”的物理预期。
+- 关键 caveat：branch artifact 当前不保存 candidate rollout 的逐步 state 序列，所以不能仅凭保存文件审计每个候选动作后的 state delta 连续性；当前只能确认每个分支都跑满 `150` 个 visible-history step、无提前 done。放大采集前建议加一个极小 trace 审计或临时 debug 输出，保存少量 anchor 的 candidate rollout state/relative-distance/target-pixel-count 序列。
+
 ### 当前科学定位
 首篇论文当前改为“privileged-to-LiDAR/range-image sensor-proxy transition”。此前 depth-only 路线已被用户在 2026-05-14 明确废弃为主传感器路线。
 
@@ -60,7 +102,7 @@
 ### 最终贡献写法
 1. **降信息追逐定义**：移除策略输入中的目标和环境真实值。
 2. **动作条件可观测性风险学习**：从特权 rollout 学习 `p_lost` 和 `R_obs(s_red, u)`。
-3. **风险调制 PPO**：动作条件可观测性风险暂定用于调制 PPO 的动作分布与优势估计；具体 actor/critic/loss 结构后续继续优化，不在当前阶段定型。
+3. **风险调制 PPO**：动作条件可观测性风险第一版用于 mean-baseline risk-adjusted advantage；actor 分布重塑、risk value critic 和 shield/filter 作为 ablation。
 4. **因果实验阶梯**：B0-B4 分离全状态上界、降信息退化、启发式风险、学习型状态风险和动作条件风险调制。
 
 ### 失败条件
@@ -437,7 +479,7 @@ Related Work 必须按论文科学约束组织：
 - 模型结论：
   - 第一版先训练 state-risk / K-frame CNN，验证 LiDAR 与标签是否可学。
   - 主力时序模型采用 CNN encoder + GRU；Mamba/SSM 作为 GRU baseline 成立后的 creative stage；Transformer/LSTM 只做 ablation。
-  - Action-conditioned `R_obs(o,u)` 不直接一步到位，先做 `u - policy_mean` perturbation，再做 candidate-action ranking/branch rollout。
+  - 该 2026-05-23 结论中的 `u - policy_mean` 方案已被 2026-06-01 B4 v0 契约取代：action-conditioned `R_obs(o,u)` 第一版直接使用 `u, u-prev_action, abs(u), u^2`，`policy_mean` 不作为 risk head reference。
 - PPO 集成结论：
   - risk model 接入 PPO 时先 frozen，不在同一 PPO rollout 中同步更新 risk model。
   - lambda 先固定网格 `{0, 0.02, 0.05, 0.1, 0.2}` 定标，再用 adaptive dual lambda；约束指标用 persistent loss / over-horizon，不用单帧 invisible rate。
@@ -446,6 +488,67 @@ Related Work 必须按论文科学约束组织：
   - B4 的 success/reach 至少达到 B0 的 `90%-95%`，并显著优于 B3。
   - persistent-loss、over-horizon、max-loss 下降，且不是靠减速或不追击换 visible rate。
   - risk model 在 heldout checkpoint/source 上 calibration、false-safe rate、candidate-action ranking 均达标。
+
+### 2026-05-24 schema7 semantic-visible rollout exporter 与 QA 发现
+
+- 当前 formal dataset 的 label 语义应以 sensor-space semantic target pixels 为准，而不是 privileged geometry detectable：
+  - `target_visible := target_pixel_count >= label_min_visible_pixels`。
+  - 默认阈值为 `3` 像素。
+  - privileged `label_detectable` 只保留为 QA/audit 字段，用于发现 semantic/sensor/FOV 对齐问题，不进入 risk-model 输入。
+- 该调整满足 anti-oracle 约束：semantic ID 仍是 simulator truth，只服务离线 label/audit 和质量控制；正式训练输入仍是 deployable stream：`lidar_range_norm`、ego state、previous/behavior action、policy distribution stats。
+- 之前 hard-mismatch 的核心风险已拆成两类：
+  1. **时序错配风险**：如果 `depth_range_pixels` / `segmentation_pixels` 只是引用而非 clone，`envs.step()` 可能原地刷新 sensor tensor，导致 `state_t` 与 `sensor_{t+1}` 配对。修复方式是在 step 前 clone sensor tensors。
+  2. **几何/semantic 边界差异**：geometry detectable 只表示中心点/几何 frustum 内，不能代表遮挡后实际像素可见；该字段只能用于 audit，不应作为训练 label。
+- `upd_1300` full-episode audit 给出当前 clean path 的强证据：
+  - 943 帧覆盖从远距约 `69m` 到成功捕获后的 `2.95m` terminal 过程。
+  - semantic-visible 与 geometry-detectable 完全一致：`617/617`，两类错配均为 `0`。
+  - 可视化 artifact 完整：range/mask/overlay/target_pixels 均为 943 个。
+  - `target_pixels/*.npz` 与 `frames.jsonl` 的 pixel count、bbox、centroid 逐帧一致。
+- `>=3 pixels` 阈值当前不引入实质样本丢失：
+  - `1 <= pixel_count < 3` 的帧数为 `0`。
+  - `pixel_count < 3` 的帧全部是 `0` 像素，主要出现在远距离视野外/边界外阶段。
+  - 因此该阈值更像是抗孤立像素噪声的防线，而不是当前数据上的强过滤。
+- QA baseline 的含义：
+  - QA baseline 是由 exporter pilot 数据生成的 `qa_baseline_schema7.json`，不是 PPO checkpoint，也不是 `policy_pool/manifest.jsonl`。
+  - `pilot` 模式可以没有 baseline；若设置 `--qa-baseline-output`，则采集结束后按 update 聚合生成 baseline。
+  - `collect` 模式必须提供 `--qa-baseline-path`，并要求 schema 与 selected update 覆盖完全匹配。
+- 仍需注意的边界：
+  - `lidar_finite_fraction_min/mean` 目前只是记录，不是 hard gate；它能发现 NaN/Inf，但不能证明所有有限数值都语义正确。
+  - 若后续正式 500 episode 中出现有限但语义错位的 LiDAR 值，需要依赖 semantic/geometry QA、baseline drift 和抽样可视化复核。
+  - schema7 baseline 必须重新生成；旧 schema6 baseline 不可复用。
+
+### 2026-06-01 多 teacher branch pilot 结论
+
+- 当前 branch 数据语义保持为单步动作条件风险：在同一 anchor state 下，对每个 candidate action 只执行 1 step，随后由对应 teacher PPO 接管 `H=150` step；没有把随机 action 连续 hold 3/5 step。
+- 多 teacher branch pilot 使用 `upd_220`、`upd_610`、`upd_1300` 各 2 条 source episode，共 48 个 anchor、每个 anchor 12 个候选动作。
+- 本轮关键修正不是改 horizon，而是改数据分布：
+  - `risk_edge` anchor 让采样集中到低像素/边界可见状态；
+  - 候选动作增加最小 L2 去重和补样，避免 clamp 后多个分支动作过近；
+  - 单进程单 env 顺序切换 checkpoint，避免 Isaac Gym 反复创建 simulation 的 segfault。
+- binary separation 明显改善：
+  - 新 pilot：`14/48 = 29.17%` anchor 有 binary `label_loss_prob_h` 分离。
+  - 旧 `upd1300` pilot：`1/16 = 6.25%`。
+  - 细分：`upd220=6/16`、`upd610=8/16`、`upd1300=0/16`，说明强 teacher 的稳定追踪状态更适合提供 severity/offset 差异，弱/中 teacher 更适合提供真正二值风险翻转。
+- 非 binary 的动作条件信息仍然有价值：
+  - 总 label separation 为 `36/48 = 75%`。
+  - severity-separated 为 `36/48`。
+  - first-loss-offset-separated 为 `24/48`。
+  - 这些样本可用于多头风险模型的 severity/offset supervision，但如果主模型只训练 binary BCE，需要继续提高 binary anchor 占比。
+- 候选动作质量：
+  - 无越界，无 exact duplicate。
+  - pairwise L2 min：mean `0.1652`，min `0.08125`，说明 `--branch-min-candidate-action-l2 0.08` 生效。
+  - pairwise L2 mean：mean `1.1127`，明显比上一版 clamp-heavy 动作覆盖更宽。
+- 图像/状态一致性：
+  - 48 个 anchor 的 metadata 和 anchor LiDAR 均存在。
+  - 状态投影中心落入 semantic bbox：`47/48`。
+  - 唯一未落入 bbox 的 anchor 是目标被底部边界裁剪；投影点在图像外约 2 px，仍与 bbox 贴边现象一致。
+  - centroid projection error：mean `0.414 px`，p95 `0.709 px`，max `7.008 px`。
+  - bbox 内最小 LiDAR range 相比状态中心距离 mean `-0.326 m`，符合看到目标表面而非几何中心的预期。
+- 分支连续性：
+  - 前 6 个 trace anchor 中，trace length 与 visible-history length 一致。
+  - 无 NaN/Inf，无 offset 断裂，无 reset-like 大跳变。
+  - 最大 per-step 变化：robot `0.0919 m`，target `0.0269 m`，relative distance `0.0946 m`。
+- 结论：当前修改证明可以继续扩大多分支采集，但建议正式大规模 branch 数据不要只依赖 `upd1300`；应混合弱/中 teacher 或更激进的 risk-edge/event anchor，否则 binary BCE 样本仍会偏少。
 
 ## C. 工程归属与执行约束
 
@@ -468,7 +571,7 @@ Related Work 必须按论文科学约束组织：
 - 已在 `ppo_guidance.py` 中添加训练期策略池保存：`runs/<run>/policy_pool/ppo_upd_*.pth` 保存 full training state，`policy_pool/manifest.jsonl` 同步 checkpoint 路径、update/global_step、课程阶段、成功率/reach rate、done 分布、reward 摘要和动作分布诊断，便于后续筛选策略池。
 
 ### 当前下一步
-1. 以冻结 B0 `runs/PE_20260520_110828/policy_pool/ppo_upd_001300_step_2396160000.pth` 重新导出 LiDAR rollout，并检查 recovery 指标分布。
-2. 对 B0 rollout 重新生成 geometry labels 和 label summary。
-3. 在训练任何 predictor 前实现 dataset manifest 检查。
+1. 启动 schema7 `500 episode` formal LiDAR risk dataset pilot rollout，保留 QA gate，并生成 `qa_baseline_schema7.json`。
+2. 检查正式输出的 `manifest.json`、`index.jsonl`、`qa/qa_windows.jsonl` 与 episode metadata，确认 `target_visible_frame_rate`、`hard_mismatch_rate`、label valid rate、LiDAR finite stats 和 checkpoint/update 覆盖。
+3. 在训练任何 predictor 前实现/运行 dataset manifest 检查，确认 training inputs 不含 `label_*`、`target_*`、semantic/debug 字段。
 4. 实现 B1-B4 降信息模式和动作条件风险调制。
