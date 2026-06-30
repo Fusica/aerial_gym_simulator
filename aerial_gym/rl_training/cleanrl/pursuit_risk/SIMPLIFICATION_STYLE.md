@@ -27,7 +27,7 @@
 
 这些不是冗余：
 
-- 真实训练分支边界，例如 `behavior_pretrain` 和 `branch_finetune`。
+- 真实数据边界，例如 raw branch `.npz` 采集和 dense branch `.npy` cache。
 - batch 结构转换，例如 branch 的 `[B,M,...] -> [B*M,...]` 展平和 `group_ids`。
 - 防止 train/val 泄漏的 grouped split，例如 branch 按 `(update, source_episode_idx)` 分组。
 - 物理或实验需要调参的 knob，例如数据采集阶段的 anchor 数、horizon、stride。
@@ -38,8 +38,8 @@
 
 当前风格默认数据已经符合 pipeline contract：
 
-- behavior runtime loader 只读固定 cache 路径。
-- branch runtime loader 只读固定 branch index 和 metadata。
+- raw branch loader 只读固定 branch index、metadata 和 anchor LiDAR。
+- runtime branch loader 只读固定 `.npy` cache 路径。
 - target 字段来自 `TARGET_SPECS`。
 - runtime loader 不依赖 `manifest.json`。
 - runtime batch 只包含模型训练需要的字段。

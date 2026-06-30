@@ -8,13 +8,12 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 
 from .dataset import (
-    PursuitRiskBranchDataset,
+    PursuitRiskBranchCacheDataset,
     flatten_branch_batch,
     move_batch_to_device,
-    split_branch_indices_by_source,
 )
 from .model import RiskNet, risk_scalar_from_outputs, risk_scalar_from_targets
 
@@ -22,26 +21,22 @@ from .model import RiskNet, risk_scalar_from_outputs, risk_scalar_from_targets
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", required=True)
-    parser.add_argument("--branch-dataset", required=True)
-    parser.add_argument("--checkpoint", default=None)
+    parser.add_argument("--branch-cache", required=True)
+    parser.add_argument("--checkpoint", default="checkpoint_best.pt")
     parser.add_argument("--output", default=None)
     parser.add_argument("--split", default="val", choices=("train", "val"))
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=0)
-    parser.add_argument("--cache-items", type=int, default=16)
     parser.add_argument("--ranking-epsilon", type=float, default=0.02)
     return parser.parse_args()
 
 
-def binary_auc(target: np.ndarray, score: np.ndarray) -> float | None:
-    target = (target >= 0.5).astype(np.int64)
-    positive = target == 1
-    negative = target == 0
-    if int(positive.sum()) == 0 or int(negative.sum()) == 0:
-        return None
+def binary_auc(target: np.ndarray, score: np.ndarray) -> float:
+    positive = target >= 0.5
+    negative = ~positive
     order = np.argsort(score)
-    ranks = np.empty_like(order, dtype=np.float64)
+    ranks = np.empty_like(order)
     ranks[order] = np.arange(1, len(score) + 1)
     return float(
         (ranks[positive].sum() - positive.sum() * (positive.sum() + 1) / 2.0)
@@ -49,11 +44,9 @@ def binary_auc(target: np.ndarray, score: np.ndarray) -> float | None:
     )
 
 
-def average_precision(target: np.ndarray, score: np.ndarray) -> float | None:
-    target = (target >= 0.5).astype(np.int64)
-    positives = int(target.sum())
-    if positives == 0:
-        return None
+def average_precision(target: np.ndarray, score: np.ndarray) -> float:
+    target = target >= 0.5
+    positives = target.sum()
     order = np.argsort(-score)
     sorted_target = target[order]
     true_positives = np.cumsum(sorted_target)
@@ -61,23 +54,18 @@ def average_precision(target: np.ndarray, score: np.ndarray) -> float | None:
     return float((precision * sorted_target).sum() / positives)
 
 
-def binary_confusion(target: np.ndarray, score: np.ndarray, threshold: float):
-    target = (target >= 0.5).astype(bool)
+def binary_metrics_at(target: np.ndarray, score: np.ndarray, threshold: float) -> dict:
+    target = target >= 0.5
     predicted = score >= threshold
     tp = int((predicted & target).sum())
     tn = int((~predicted & ~target).sum())
     fp = int((predicted & ~target).sum())
     fn = int((~predicted & target).sum())
-    return tp, tn, fp, fn
-
-
-def binary_metrics_at(target: np.ndarray, score: np.ndarray, threshold: float) -> dict:
-    tp, tn, fp, fn = binary_confusion(target, score, threshold)
     total = tp + tn + fp + fn
-    precision = tp / max(tp + fp, 1)
-    recall = tp / max(tp + fn, 1)
-    specificity = tn / max(tn + fp, 1)
-    f1 = 2.0 * precision * recall / max(precision + recall, 1e-12)
+    precision = np.divide(tp, tp + fp)
+    recall = np.divide(tp, tp + fn)
+    specificity = np.divide(tn, tn + fp)
+    f1 = np.divide(2.0 * precision * recall, precision + recall)
     return {
         "threshold": float(threshold),
         "accuracy": float((tp + tn) / total),
@@ -93,33 +81,8 @@ def binary_metrics_at(target: np.ndarray, score: np.ndarray, threshold: float) -
     }
 
 
-def threshold_sweep(target: np.ndarray, score: np.ndarray) -> tuple[dict, dict]:
-    thresholds = np.unique(np.concatenate(([0.0, 0.5, 1.0], score)))
-    best_accuracy = None
-    best_f1 = None
-    for threshold in thresholds:
-        metrics = binary_metrics_at(target, score, threshold)
-        if best_accuracy is None or (
-            metrics["accuracy"],
-            metrics["balanced_accuracy"],
-        ) > (
-            best_accuracy["accuracy"],
-            best_accuracy["balanced_accuracy"],
-        ):
-            best_accuracy = metrics
-        if best_f1 is None or (
-            metrics["f1"],
-            metrics["accuracy"],
-        ) > (
-            best_f1["f1"],
-            best_f1["accuracy"],
-        ):
-            best_f1 = metrics
-    return best_accuracy, best_f1
-
-
-def calibration_error(target: np.ndarray, probability: np.ndarray, bins: int) -> tuple[float, float]:
-    target = (target >= 0.5).astype(np.float64)
+def calibration_error(target: np.ndarray, probability: np.ndarray, bins: int):
+    target = target >= 0.5
     edges = np.linspace(0.0, 1.0, bins + 1)
     ece = 0.0
     mce = 0.0
@@ -139,42 +102,38 @@ def calibration_error(target: np.ndarray, probability: np.ndarray, bins: int) ->
 
 
 def top_fraction_metrics(target: np.ndarray, score: np.ndarray, fraction: float) -> dict:
-    target = (target >= 0.5).astype(np.int64)
-    count = max(1, int(round(len(target) * fraction)))
+    target = target >= 0.5
+    count = int(np.ceil(len(target) * fraction))
     order = np.argsort(-score)[:count]
-    positives = int(target.sum())
-    true_positives = int(target[order].sum())
+    positives = target.sum()
+    true_positives = target[order].sum()
     precision = true_positives / count
     return {
         "fraction": float(fraction),
         "count": count,
         "precision": float(precision),
-        "recall": float(true_positives / max(positives, 1)),
-        "lift": float(precision / max(float(target.mean()), 1e-12)),
+        "recall": float(true_positives / positives),
+        "lift": float(precision / target.mean()),
     }
 
 
 def regression_metrics(target: np.ndarray, prediction: np.ndarray) -> dict:
     error = prediction - target
-    denominator = float(np.sum((target - target.mean()) ** 2))
+    denominator = np.sum((target - target.mean()) ** 2)
     return {
         "mae": float(np.mean(np.abs(error))),
         "rmse": float(np.sqrt(np.mean(error * error))),
-        "r2": float(1.0 - np.sum(error * error) / denominator) if denominator > 0.0 else None,
-        "pearson": float(np.corrcoef(target, prediction)[0, 1])
-        if np.std(target) > 0.0 and np.std(prediction) > 0.0
-        else None,
+        "r2": float(1.0 - np.sum(error * error) / denominator),
+        "pearson": float(np.corrcoef(target, prediction)[0, 1]),
         "target_mean": float(target.mean()),
         "prediction_mean": float(prediction.mean()),
     }
 
 
 def binary_report(target: np.ndarray, score: np.ndarray, bins: int) -> dict:
-    target = target.astype(np.float64)
-    score = score.astype(np.float64)
-    best_accuracy, best_f1 = threshold_sweep(target, score)
+    threshold_metrics = [binary_metrics_at(target, score, threshold) for threshold in np.unique(score)]
     ece, mce = calibration_error(target, score, bins)
-    binary_target = (target >= 0.5).astype(np.int64)
+    binary_target = target >= 0.5
     clipped_score = np.clip(score, 1e-7, 1.0 - 1e-7)
     return {
         "n": int(len(target)),
@@ -188,52 +147,39 @@ def binary_report(target: np.ndarray, score: np.ndarray, bins: int) -> dict:
         "ece": ece,
         "mce": mce,
         "at_threshold_0p5": binary_metrics_at(target, score, 0.5),
-        "best_accuracy": best_accuracy,
-        "best_f1": best_f1,
+        "best_accuracy": max(
+            threshold_metrics,
+            key=lambda item: (item["accuracy"], item["balanced_accuracy"]),
+        ),
+        "best_f1": max(threshold_metrics, key=lambda item: (item["f1"], item["accuracy"])),
         "top_5pct": top_fraction_metrics(target, score, 0.05),
         "top_10pct": top_fraction_metrics(target, score, 0.10),
         "top_20pct": top_fraction_metrics(target, score, 0.20),
     }
 
 
-def rankdata(values: np.ndarray) -> np.ndarray:
-    order = np.argsort(values)
-    ranks = np.empty(len(values), dtype=np.float64)
-    ranks[order] = np.arange(len(values), dtype=np.float64)
-    return ranks
-
-
-def spearman(predicted: np.ndarray, target: np.ndarray) -> float | None:
-    if len(predicted) < 2 or np.std(predicted) == 0.0 or np.std(target) == 0.0:
-        return None
-    return float(np.corrcoef(rankdata(predicted), rankdata(target))[0, 1])
+def spearman(predicted: np.ndarray, target: np.ndarray) -> float:
+    pred_ranks = np.empty(len(predicted))
+    target_ranks = np.empty(len(target))
+    pred_ranks[np.argsort(predicted)] = np.arange(len(predicted))
+    target_ranks[np.argsort(target)] = np.arange(len(target))
+    return float(np.corrcoef(pred_ranks, target_ranks)[0, 1])
 
 
 def main():
     args = parse_args()
     run_dir = Path(args.run_dir)
     config = json.loads((run_dir / "config.json").read_text())
-    checkpoint_path = Path(args.checkpoint) if args.checkpoint is not None else run_dir / "checkpoint_best.pt"
+    checkpoint_path = run_dir / args.checkpoint
 
     device = torch.device(args.device)
 
-    dataset = PursuitRiskBranchDataset(
-        args.branch_dataset,
-        cache_items=args.cache_items,
-    )
-    train_indices, val_indices = split_branch_indices_by_source(
-        dataset,
-        config["val_fraction"],
-        config["seed"],
-    )
-    indices = train_indices if args.split == "train" else val_indices
-    subset = Subset(dataset, indices)
+    dataset = PursuitRiskBranchCacheDataset(args.branch_cache, split=args.split)
     loader = DataLoader(
-        subset,
+        dataset,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        drop_last=False,
     )
 
     model = RiskNet(
@@ -244,7 +190,6 @@ def main():
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
-    anchors = []
     flat_pred_risk = []
     flat_true_risk = []
     flat_p50 = []
@@ -258,6 +203,15 @@ def main():
     flat_pred_recovery150 = []
     flat_recovery150 = []
     flat_recovery_valid150 = []
+    hit_top1 = []
+    hit_top3 = []
+    pred_selected = []
+    oracle = []
+    random_mean = []
+    regrets = []
+    normalized_regrets = []
+    spearman_values = []
+    true_ranges = []
     pair_correct = 0
     pair_total = 0
 
@@ -300,20 +254,20 @@ def main():
             for anchor_idx in range(batch_size):
                 pred = predicted_risk[anchor_idx]
                 true = true_risk[anchor_idx]
-                pred_best = int(np.argmin(pred))
+                pred_best = np.argmin(pred)
                 true_order = np.argsort(true)
-                oracle_best = int(true_order[0])
-                top3 = set(int(idx) for idx in true_order[: min(3, candidates)])
-                true_range = float(np.max(true) - np.min(true))
-                regret = float(true[pred_best] - true[oracle_best])
+                oracle_best = true_order[0]
+                top3 = set(true_order[: min(3, candidates)])
+                true_range = np.max(true) - np.min(true)
+                regret = true[pred_best] - true[oracle_best]
                 anchor_pair_correct = 0
                 anchor_pair_total = 0
                 for left in range(candidates):
                     for right in range(left + 1, candidates):
-                        true_diff = float(true[left] - true[right])
+                        true_diff = true[left] - true[right]
                         if abs(true_diff) <= args.ranking_epsilon:
                             continue
-                        pred_diff = float(pred[left] - pred[right])
+                        pred_diff = pred[left] - pred[right]
                         anchor_pair_total += 1
                         anchor_pair_correct += int(
                             (true_diff > 0.0 and pred_diff > 0.0)
@@ -321,19 +275,15 @@ def main():
                         )
                 pair_correct += anchor_pair_correct
                 pair_total += anchor_pair_total
-                anchors.append(
-                    {
-                        "hit_top1": int(pred_best == oracle_best),
-                        "hit_top3": int(pred_best in top3),
-                        "oracle_true_risk": float(true[oracle_best]),
-                        "pred_selected_true_risk": float(true[pred_best]),
-                        "random_true_risk_mean": float(np.mean(true)),
-                        "regret": regret,
-                        "normalized_regret": regret / max(true_range, 1e-8),
-                        "spearman": spearman(pred, true),
-                        "true_range": true_range,
-                    }
-                )
+                hit_top1.append(pred_best == oracle_best)
+                hit_top3.append(pred_best in top3)
+                oracle.append(true[oracle_best])
+                pred_selected.append(true[pred_best])
+                random_mean.append(np.mean(true))
+                regrets.append(regret)
+                normalized_regrets.append(regret / true_range)
+                spearman_values.append(spearman(pred, true))
+                true_ranges.append(true_range)
 
     flat_pred_risk = np.concatenate(flat_pred_risk)
     flat_true_risk = np.concatenate(flat_true_risk)
@@ -349,13 +299,12 @@ def main():
     flat_recovery150 = np.concatenate(flat_recovery150)
     flat_recovery_valid150 = np.concatenate(flat_recovery_valid150)
 
-    spearman_values = [row["spearman"] for row in anchors if row["spearman"] is not None]
-    pred_selected = np.asarray([row["pred_selected_true_risk"] for row in anchors], dtype=np.float64)
-    oracle = np.asarray([row["oracle_true_risk"] for row in anchors], dtype=np.float64)
-    random_mean = np.asarray([row["random_true_risk_mean"] for row in anchors], dtype=np.float64)
-    regrets = np.asarray([row["regret"] for row in anchors], dtype=np.float64)
-    normalized_regrets = np.asarray([row["normalized_regret"] for row in anchors], dtype=np.float64)
-    true_ranges = np.asarray([row["true_range"] for row in anchors], dtype=np.float64)
+    pred_selected = np.asarray(pred_selected)
+    oracle = np.asarray(oracle)
+    random_mean = np.asarray(random_mean)
+    regrets = np.asarray(regrets)
+    normalized_regrets = np.asarray(normalized_regrets)
+    true_ranges = np.asarray(true_ranges)
     risk_report = regression_metrics(flat_true_risk, flat_pred_risk)
     h50_report = binary_report(flat_y50, flat_p50, 15)
     h150_report = binary_report(flat_y150, flat_p150, 15)
@@ -363,16 +312,16 @@ def main():
     report = {
         "run_dir": str(run_dir),
         "checkpoint": str(checkpoint_path),
+        "branch_cache": args.branch_cache,
         "split": args.split,
-        "branch_total_valid_pair_anchors": len(dataset),
-        "anchors": len(subset),
-        "candidate_count": len(flat_pred_risk) // max(len(subset), 1),
-        "pairwise_accuracy": float(pair_correct / max(pair_total, 1)),
+        "anchors": len(dataset),
+        "candidate_count": len(flat_pred_risk) // len(dataset),
+        "pairwise_accuracy": float(pair_correct / pair_total),
         "pairwise_pairs": int(pair_total),
-        "spearman_mean": float(np.mean(spearman_values)) if spearman_values else None,
-        "spearman_median": float(np.median(spearman_values)) if spearman_values else None,
-        "top1_hit_rate": float(np.mean([row["hit_top1"] for row in anchors])),
-        "top3_hit_rate": float(np.mean([row["hit_top3"] for row in anchors])),
+        "spearman_mean": float(np.mean(spearman_values)),
+        "spearman_median": float(np.median(spearman_values)),
+        "top1_hit_rate": float(np.mean(hit_top1)),
+        "top3_hit_rate": float(np.mean(hit_top3)),
         "mean_true_range": float(np.mean(true_ranges)),
         "mean_regret": float(np.mean(regrets)),
         "median_regret": float(np.median(regrets)),
@@ -393,9 +342,7 @@ def main():
         "recovery_150": regression_metrics(
             flat_recovery150[flat_recovery_valid150],
             flat_pred_recovery150[flat_recovery_valid150],
-        )
-        if flat_recovery_valid150.any()
-        else None,
+        ),
     }
 
     output_path = Path(args.output) if args.output is not None else run_dir / f"branch_action_metrics_{args.split}.json"

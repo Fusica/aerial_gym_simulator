@@ -1,10 +1,4 @@
-"""Train pursuit LiDAR observability risk model.
-
-Two stages are supported with one model structure:
-
-1. behavior_pretrain: cached schema7 behavior data, using behavior_action as u.
-2. branch_finetune: same-anchor candidate-action data, with pairwise ranking.
-"""
+"""Train branch-only pursuit LiDAR observability risk model."""
 
 from __future__ import annotations
 
@@ -18,14 +12,12 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 
 from .dataset import (
-    PursuitRiskBehaviorDataset,
-    PursuitRiskBranchDataset,
+    PursuitRiskBranchCacheDataset,
     flatten_branch_batch,
     move_batch_to_device,
-    split_branch_indices_by_source,
 )
 from .model import (
     RiskNet,
@@ -37,9 +29,7 @@ from .model import (
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--stage", choices=("behavior_pretrain", "branch_finetune"), required=True)
-    parser.add_argument("--behavior-cache", default=None)
-    parser.add_argument("--branch-dataset", default="runs/risk_dataset/D0_branch_full_v1_10ckpt_500ep_h150_k3_m16")
+    parser.add_argument("--branch-cache", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--resume", default=None)
     parser.add_argument("--device", default="cuda:0")
@@ -52,12 +42,10 @@ def parse_args():
     parser.add_argument("--persistent-workers", dest="persistent_workers", action="store_true")
     parser.add_argument("--no-persistent-workers", dest="persistent_workers", action="store_false")
     parser.add_argument("--prefetch-factor", type=int, default=2)
-    parser.add_argument("--cache-items", type=int, default=16)
     parser.add_argument("--no-train-shuffle", action="store_true")
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--backbone-lr-mult", type=float, default=0.25)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--val-fraction", type=float, default=0.1)
     parser.add_argument("--lidar-resize", type=int, nargs=2, default=(128, 384), metavar=("H", "W"))
     parser.add_argument("--hidden-dim", type=int, default=256)
     parser.add_argument("--freeze-backbone-epochs", type=int, default=0)
@@ -75,7 +63,11 @@ def parse_args():
 
     parser.add_argument("--log-interval", type=int, default=20)
     parser.set_defaults(pin_memory=True, persistent_workers=True)
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.num_workers == 0:
+        args.persistent_workers = False
+        args.prefetch_factor = None
+    return args
 
 
 def set_seed(seed: int):
@@ -107,35 +99,14 @@ def build_optimizer(model: RiskNet, args) -> torch.optim.Optimizer:
 
 
 def build_datasets(args):
-    if args.stage == "behavior_pretrain":
-        if args.behavior_cache is None:
-            raise ValueError(
-                "--stage behavior_pretrain requires --behavior-cache. "
-                "Run prepare_cache.py first to build the cache."
-        )
-        train_dataset = PursuitRiskBehaviorDataset(args.behavior_cache, split="train")
-        val_dataset = PursuitRiskBehaviorDataset(args.behavior_cache, split="val")
-        return train_dataset, val_dataset
-    else:
-        dataset = PursuitRiskBranchDataset(
-            args.branch_dataset,
-            cache_items=args.cache_items,
-        )
-        train_indices, val_indices = split_branch_indices_by_source(
-            dataset,
-            args.val_fraction,
-            args.seed,
-        )
-    if args.no_train_shuffle:
-        train_indices = sorted(train_indices)
-    return Subset(dataset, train_indices), Subset(dataset, val_indices)
+    return (
+        PursuitRiskBranchCacheDataset(args.branch_cache, split="train"),
+        PursuitRiskBranchCacheDataset(args.branch_cache, split="val"),
+    )
 
 
-def prepare_batch(batch: Dict, stage: str, device: torch.device):
-    batch = move_batch_to_device(batch, device)
-    if stage == "branch_finetune":
-        return flatten_branch_batch(batch)
-    return batch["lidar"], batch["s_red"], batch["action"], batch["targets"], None
+def prepare_batch(batch: Dict, device: torch.device):
+    return flatten_branch_batch(move_batch_to_device(batch, device))
 
 
 def _binary_auc(target: np.ndarray, score: np.ndarray) -> Optional[float]:
@@ -193,7 +164,7 @@ def train_one_epoch(model, loader, optimizer, scaler, args, device, epoch: int) 
     totals: Dict[str, float] = {}
     counts: Dict[str, int] = {}
     use_amp = args.amp and device.type == "cuda"
-    print(f"epoch {epoch}: training {args.stage}; metrics show supervised risk and ranking fit")
+    print(f"epoch {epoch}: training branch risk; metrics show supervised risk and ranking fit")
     data_time_total = 0.0
     step_time_total = 0.0
     interval_count = 0
@@ -203,7 +174,7 @@ def train_one_epoch(model, loader, optimizer, scaler, args, device, epoch: int) 
         step_start = time.perf_counter()
         if args.max_train_steps is not None and step >= args.max_train_steps:
             break
-        lidar, s_red, action, targets, group_ids = prepare_batch(batch, args.stage, device)
+        lidar, s_red, action, targets, group_ids = prepare_batch(batch, device)
         optimizer.zero_grad(set_to_none=True)
         with torch.cuda.amp.autocast(enabled=use_amp):
             outputs = model(lidar, s_red, action)
@@ -251,7 +222,7 @@ def evaluate(model, loader, args, device: torch.device, max_steps: Optional[int]
         for step, batch in enumerate(loader):
             if max_steps is not None and step >= max_steps:
                 break
-            lidar, s_red, action, targets, group_ids = prepare_batch(batch, args.stage, device)
+            lidar, s_red, action, targets, group_ids = prepare_batch(batch, device)
             outputs = model(lidar, s_red, action)
             _loss, metrics = risk_loss(
                 outputs,
@@ -275,14 +246,13 @@ def evaluate(model, loader, args, device: torch.device, max_steps: Optional[int]
                         - targets[f"loss_severity_{horizon}"].cpu()[valid]
                     ).numpy()
                 )
-            if group_ids is not None:
-                pred_rho = risk_scalar_from_outputs(outputs).cpu()
-                target_rho = risk_scalar_from_targets({k: v.cpu() for k, v in targets.items()})
-                valid = (targets["valid_50"] & targets["valid_150"]).cpu().bool()
-                groups = group_ids.cpu()
-                correct, total = pairwise_accuracy(pred_rho, target_rho, groups, valid, args.ranking_epsilon)
-                ranking_correct += correct
-                ranking_total += total
+            pred_rho = risk_scalar_from_outputs(outputs).cpu()
+            target_rho = risk_scalar_from_targets({k: v.cpu() for k, v in targets.items()})
+            valid = (targets["valid_50"] & targets["valid_150"]).cpu().bool()
+            groups = group_ids.cpu()
+            correct, total = pairwise_accuracy(pred_rho, target_rho, groups, valid, args.ranking_epsilon)
+            ranking_correct += correct
+            ranking_total += total
     metrics = average_metrics(totals, counts, "val")
     for horizon in (50, 150):
         if p_targets[horizon]:
@@ -304,13 +274,12 @@ def evaluate(model, loader, args, device: torch.device, max_steps: Optional[int]
 
 
 def save_checkpoint(path: Path, model: RiskNet, optimizer, args, epoch: int, metrics: Dict[str, float]):
-    args_payload = vars(args).copy()
     payload = {
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "epoch": epoch,
         "metrics": metrics,
-        "args": args_payload,
+        "args": vars(args).copy(),
         "model_type": "RiskNet_CNN_GRU_v2",
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -326,9 +295,7 @@ def main():
         json.dump(vars(args), handle, indent=2, sort_keys=True)
 
     device = torch.device(args.device)
-
     train_dataset, val_dataset = build_datasets(args)
-
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -336,7 +303,7 @@ def main():
         num_workers=args.num_workers,
         pin_memory=args.pin_memory,
         persistent_workers=args.persistent_workers,
-        prefetch_factor=args.prefetch_factor
+        prefetch_factor=args.prefetch_factor,
     )
     val_loader = DataLoader(
         val_dataset,
@@ -345,7 +312,7 @@ def main():
         num_workers=args.num_workers,
         pin_memory=args.pin_memory,
         persistent_workers=args.persistent_workers,
-        prefetch_factor=args.prefetch_factor
+        prefetch_factor=args.prefetch_factor,
     )
 
     model = RiskNet(hidden_dim=args.hidden_dim, resize_hw=tuple(args.lidar_resize)).to(device)
@@ -353,7 +320,7 @@ def main():
         checkpoint = torch.load(args.resume, map_location=device)
         model.load_state_dict(checkpoint.get("model_state_dict", checkpoint) if isinstance(checkpoint, dict) else checkpoint)
         print(f"loaded checkpoint {args.resume} epoch={checkpoint.get('epoch') if isinstance(checkpoint, dict) else None}")
-    freeze_backbone = args.stage == "branch_finetune" and args.freeze_backbone_epochs > 0
+    freeze_backbone = args.freeze_backbone_epochs > 0
     for param in model.lidar_backbone.parameters():
         param.requires_grad = not freeze_backbone
     optimizer = build_optimizer(model, args)
