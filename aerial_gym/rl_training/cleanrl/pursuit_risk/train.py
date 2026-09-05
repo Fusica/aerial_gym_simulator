@@ -98,17 +98,6 @@ def build_optimizer(model: RiskNet, args) -> torch.optim.Optimizer:
     return torch.optim.AdamW(param_groups, weight_decay=args.weight_decay)
 
 
-def build_datasets(args):
-    return (
-        PursuitRiskBranchCacheDataset(args.branch_cache, split="train"),
-        PursuitRiskBranchCacheDataset(args.branch_cache, split="val"),
-    )
-
-
-def prepare_batch(batch: Dict, device: torch.device):
-    return flatten_branch_batch(move_batch_to_device(batch, device))
-
-
 def _binary_auc(target: np.ndarray, score: np.ndarray) -> Optional[float]:
     target = target.astype(np.int64)
     pos = target == 1
@@ -174,7 +163,7 @@ def train_one_epoch(model, loader, optimizer, scaler, args, device, epoch: int) 
         step_start = time.perf_counter()
         if args.max_train_steps is not None and step >= args.max_train_steps:
             break
-        lidar, s_red, action, targets, group_ids = prepare_batch(batch, device)
+        lidar, s_red, action, targets, group_ids = flatten_branch_batch(move_batch_to_device(batch, device))
         optimizer.zero_grad(set_to_none=True)
         with torch.cuda.amp.autocast(enabled=use_amp):
             outputs = model(lidar, s_red, action)
@@ -222,7 +211,7 @@ def evaluate(model, loader, args, device: torch.device, max_steps: Optional[int]
         for step, batch in enumerate(loader):
             if max_steps is not None and step >= max_steps:
                 break
-            lidar, s_red, action, targets, group_ids = prepare_batch(batch, device)
+            lidar, s_red, action, targets, group_ids = flatten_branch_batch(move_batch_to_device(batch, device))
             outputs = model(lidar, s_red, action)
             _loss, metrics = risk_loss(
                 outputs,
@@ -295,7 +284,8 @@ def main():
         json.dump(vars(args), handle, indent=2, sort_keys=True)
 
     device = torch.device(args.device)
-    train_dataset, val_dataset = build_datasets(args)
+    train_dataset = PursuitRiskBranchCacheDataset(args.branch_cache, split="train")
+    val_dataset = PursuitRiskBranchCacheDataset(args.branch_cache, split="val")
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,

@@ -190,19 +190,24 @@ def main():
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
-    flat_pred_risk = []
-    flat_true_risk = []
-    flat_p50 = []
-    flat_y50 = []
-    flat_p150 = []
-    flat_y150 = []
-    flat_pred_severity50 = []
-    flat_severity50 = []
-    flat_pred_severity150 = []
-    flat_severity150 = []
-    flat_pred_recovery150 = []
-    flat_recovery150 = []
-    flat_recovery_valid150 = []
+    flat = {
+        key: []
+        for key in (
+            "pred_risk",
+            "true_risk",
+            "p50",
+            "y50",
+            "p150",
+            "y150",
+            "pred_severity50",
+            "severity50",
+            "pred_severity150",
+            "severity150",
+            "pred_recovery150",
+            "recovery150",
+            "recovery_valid150",
+        )
+    }
     hit_top1 = []
     hit_top3 = []
     pred_selected = []
@@ -237,19 +242,22 @@ def main():
             recovery150 = targets["recovery_150"].cpu().numpy().reshape(batch_size, candidates)
             recovery_valid150 = targets["recovery_valid_150"].cpu().numpy().reshape(batch_size, candidates)
 
-            flat_pred_risk.append(predicted_risk.reshape(-1))
-            flat_true_risk.append(true_risk.reshape(-1))
-            flat_p50.append(p50.reshape(-1))
-            flat_y50.append(y50.reshape(-1))
-            flat_p150.append(p150.reshape(-1))
-            flat_y150.append(y150.reshape(-1))
-            flat_pred_severity50.append(pred_severity50.reshape(-1))
-            flat_severity50.append(severity50.reshape(-1))
-            flat_pred_severity150.append(pred_severity150.reshape(-1))
-            flat_severity150.append(severity150.reshape(-1))
-            flat_pred_recovery150.append(pred_recovery150.reshape(-1))
-            flat_recovery150.append(recovery150.reshape(-1))
-            flat_recovery_valid150.append(recovery_valid150.reshape(-1))
+            for key, value in (
+                ("pred_risk", predicted_risk),
+                ("true_risk", true_risk),
+                ("p50", p50),
+                ("y50", y50),
+                ("p150", p150),
+                ("y150", y150),
+                ("pred_severity50", pred_severity50),
+                ("severity50", severity50),
+                ("pred_severity150", pred_severity150),
+                ("severity150", severity150),
+                ("pred_recovery150", pred_recovery150),
+                ("recovery150", recovery150),
+                ("recovery_valid150", recovery_valid150),
+            ):
+                flat[key].append(value.reshape(-1))
 
             for anchor_idx in range(batch_size):
                 pred = predicted_risk[anchor_idx]
@@ -285,19 +293,7 @@ def main():
                 spearman_values.append(spearman(pred, true))
                 true_ranges.append(true_range)
 
-    flat_pred_risk = np.concatenate(flat_pred_risk)
-    flat_true_risk = np.concatenate(flat_true_risk)
-    flat_p50 = np.concatenate(flat_p50)
-    flat_y50 = np.concatenate(flat_y50)
-    flat_p150 = np.concatenate(flat_p150)
-    flat_y150 = np.concatenate(flat_y150)
-    flat_pred_severity50 = np.concatenate(flat_pred_severity50)
-    flat_severity50 = np.concatenate(flat_severity50)
-    flat_pred_severity150 = np.concatenate(flat_pred_severity150)
-    flat_severity150 = np.concatenate(flat_severity150)
-    flat_pred_recovery150 = np.concatenate(flat_pred_recovery150)
-    flat_recovery150 = np.concatenate(flat_recovery150)
-    flat_recovery_valid150 = np.concatenate(flat_recovery_valid150)
+    flat = {key: np.concatenate(values) for key, values in flat.items()}
 
     pred_selected = np.asarray(pred_selected)
     oracle = np.asarray(oracle)
@@ -305,9 +301,9 @@ def main():
     regrets = np.asarray(regrets)
     normalized_regrets = np.asarray(normalized_regrets)
     true_ranges = np.asarray(true_ranges)
-    risk_report = regression_metrics(flat_true_risk, flat_pred_risk)
-    h50_report = binary_report(flat_y50, flat_p50, 15)
-    h150_report = binary_report(flat_y150, flat_p150, 15)
+    risk_report = regression_metrics(flat["true_risk"], flat["pred_risk"])
+    h50_report = binary_report(flat["y50"], flat["p50"], 15)
+    h150_report = binary_report(flat["y150"], flat["p150"], 15)
 
     report = {
         "run_dir": str(run_dir),
@@ -315,7 +311,7 @@ def main():
         "branch_cache": args.branch_cache,
         "split": args.split,
         "anchors": len(dataset),
-        "candidate_count": len(flat_pred_risk) // len(dataset),
+        "candidate_count": len(flat["pred_risk"]) // len(dataset),
         "pairwise_accuracy": float(pair_correct / pair_total),
         "pairwise_pairs": int(pair_total),
         "spearman_mean": float(np.mean(spearman_values)),
@@ -336,12 +332,12 @@ def main():
         "h150": h150_report,
         "mAP_h50_h150": float(np.mean([h50_report["ap"], h150_report["ap"]])),
         "mean_auroc_h50_h150": float(np.mean([h50_report["auroc"], h150_report["auroc"]])),
-        "severity_50": regression_metrics(flat_severity50, flat_pred_severity50),
-        "severity_150": regression_metrics(flat_severity150, flat_pred_severity150),
+        "severity_50": regression_metrics(flat["severity50"], flat["pred_severity50"]),
+        "severity_150": regression_metrics(flat["severity150"], flat["pred_severity150"]),
         "risk_scalar": risk_report,
         "recovery_150": regression_metrics(
-            flat_recovery150[flat_recovery_valid150],
-            flat_pred_recovery150[flat_recovery_valid150],
+            flat["recovery150"][flat["recovery_valid150"]],
+            flat["pred_recovery150"][flat["recovery_valid150"]],
         ),
     }
 

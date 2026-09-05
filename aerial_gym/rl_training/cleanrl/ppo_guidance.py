@@ -33,7 +33,6 @@ import sys
 import random
 import time
 import uuid
-import json
 from typing import Optional
 
 try:
@@ -251,140 +250,6 @@ def format_score(score):
     )
 
 
-def json_safe(value):
-    if isinstance(value, dict):
-        return {str(k): json_safe(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [json_safe(v) for v in value]
-    if torch.is_tensor(value):
-        if value.numel() == 1:
-            return json_safe(value.item())
-        return json_safe(value.detach().cpu().tolist())
-    if isinstance(value, np.ndarray):
-        return json_safe(value.tolist())
-    if isinstance(value, np.generic):
-        return json_safe(value.item())
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-    return str(value)
-
-
-def append_jsonl(path: str, record: dict):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(json_safe(record), ensure_ascii=False, sort_keys=True) + "\n")
-
-
-def score_to_dict(score):
-    if score is None:
-        return None
-    success_rate, avg_return, avg_min_dist, avg_length = score
-    return {
-        "success_rate": float(success_rate),
-        "avg_return": float(avg_return),
-        "avg_min_relative_dist": float(avg_min_dist),
-        "avg_episode_length": float(avg_length),
-    }
-
-
-def curriculum_metadata(curriculum_controller):
-    if curriculum_controller is None:
-        return None
-    state = curriculum_controller.get_state_dict()
-    return {
-        "stage_idx": int(state["stage_idx"]),
-        "current_threshold": float(curriculum_controller.current_threshold),
-        "stage_success_streak": int(state["stage_success_streak"]),
-        "visibility_reward_weight_scale": float(
-            curriculum_controller.visibility_reward_weight_scale
-        ),
-    }
-
-
-def should_save_policy_pool_checkpoint(args, update: int, start_update: int, curriculum_transition) -> bool:
-    if not getattr(args, "save_policy_pool", False):
-        return False
-    if update == start_update:
-        return True
-    interval_updates = int(getattr(args, "policy_pool_save_interval_updates", 0))
-    if interval_updates > 0 and update % interval_updates == 0:
-        return True
-    return curriculum_transition is not None
-
-
-def policy_pool_save_reason(args, update: int, start_update: int, curriculum_transition):
-    reasons = []
-    if update == start_update:
-        reasons.append("first_update")
-    interval_updates = int(getattr(args, "policy_pool_save_interval_updates", 0))
-    if interval_updates > 0 and update % interval_updates == 0:
-        reasons.append("interval")
-    if curriculum_transition is not None:
-        reasons.append("curriculum_transition")
-    return reasons
-
-
-def build_policy_pool_metadata(
-    args,
-    run_name: str,
-    run_dir: str,
-    checkpoint_path: str,
-    global_step: int,
-    update: int,
-    start_update: int,
-    score,
-    episode_metrics,
-    update_metrics,
-    curriculum_controller,
-    curriculum_transition,
-    reasons,
-):
-    step_per_update = int(args.num_envs * args.num_steps)
-    return {
-        "schema_version": 1,
-        "source_family": "ppo",
-        "source_kind": "ppo_curriculum_checkpoint" if curriculum_controller is not None else "ppo_checkpoint",
-        "pool_role": "trajectory_data_source",
-        "checkpoint_type": "full_training_state",
-        "checkpoint_path": os.path.relpath(checkpoint_path, run_dir),
-        "checkpoint_abspath": os.path.abspath(checkpoint_path),
-        "run_name": run_name,
-        "run_dir": run_dir,
-        "update": int(update),
-        "global_step": int(global_step),
-        "start_update": int(start_update),
-        "total_timesteps": int(args.total_timesteps),
-        "progress_fraction": float(global_step) / float(max(args.total_timesteps, 1)),
-        "step_per_update": step_per_update,
-        "save_interval_updates": int(getattr(args, "policy_pool_save_interval_updates", 0)),
-        "save_reasons": reasons,
-        "score": score_to_dict(score),
-        "episode_metrics": episode_metrics,
-        "update_metrics": update_metrics,
-        "curriculum": curriculum_metadata(curriculum_controller),
-        "curriculum_transition": curriculum_transition,
-        "training_config": {
-            "task": args.task,
-            "seed": int(args.seed),
-            "num_envs": int(args.num_envs),
-            "num_steps": int(args.num_steps),
-            "batch_size": int(args.batch_size),
-            "total_timesteps": int(args.total_timesteps),
-            "learning_rate": float(args.learning_rate),
-            "ent_coef": float(args.ent_coef),
-            "ent_coef_final": float(args.ent_coef_final),
-            "gamma": float(args.gamma),
-            "gae_lambda": float(args.gae_lambda),
-            "curriculum_enabled": bool(args.curriculum),
-            "curriculum_stable_success_rate": float(args.curriculum_stable_success_rate),
-            "curriculum_stable_success_updates": int(args.curriculum_stable_success_updates),
-            "curriculum_stable_success_min_episodes": int(
-                args.curriculum_stable_success_min_episodes
-            ),
-        },
-    }
-
-
 def make_run_name(task: str) -> str:
     from datetime import datetime, timezone, timedelta
 
@@ -491,7 +356,8 @@ def get_args():
         {"name": "--task", "type": str, "default": "pursuit_guidance_task", "help": "Resume training or start testing from a checkpoint. Overrides config file if provided."},
         {"name": "--experiment_name", "type": str, "default": os.path.basename(__file__).rstrip(".py"), "help": "Name of the experiment to run or load. Overrides config file if provided."},
         {"name": "--checkpoint", "type": str, "default": None, "help": "Saved model checkpoint number."},        
-        {"name": "--headless", "action": "store_true", "default": False, "help": "Force display off at all times"},
+        {"name": "--headless", "action": "store_true", "default": False, "help": "Force display off at all times (kept for command compatibility; training is headless by default)"},
+        {"name": "--viewer", "action": "store_true", "default": False, "help": "Enable the simulator viewer instead of the default headless training mode"},
         {"name": "--horovod", "action": "store_true", "default": False, "help": "Use horovod for multi-gpu training"},
         {"name": "--rl_device", "type": str, "default": "cuda:0", "help": 'Device used by the RL algorithm, (cpu, gpu, cuda:0, cuda:1 etc..)'},
         {"name": "--num_envs", "type": int, "default": 512, "help": "Number of environments to create. Overrides config file if provided."},
@@ -520,7 +386,7 @@ def get_args():
             "help": "Toggle learning rate annealing for policy and value networks"},
 
         # 学习率调度参数
-        {"name": "--use-lr-scheduler", "action": "store_true", "default": True, # 启用新的学习率调度器（warmup + 余弦衰减）
+        {"name": "--use-lr-scheduler", "action": "store_true", "default": False,
             "help": "Use warmup + cosine annealing learning rate scheduler"},
         {"name": "--warmup-steps", "type":int, "default": 10000000, # warmup阶段的global steps，从小学习率线性增长到目标学习率
             "help": "Number of warmup global steps for learning rate scheduler (default: 10M steps)"},
@@ -552,12 +418,8 @@ def get_args():
         {"name": "--save-best", "action": "store_true", "default": True, "help": "启用基于指标的best.pth保存（注意：某些解析器对store_true默认值处理不一致）"},
         {"name": "--no-save-best", "action": "store_true", "default": False, "help": "禁用best.pth保存（覆盖 --save-best）"},
         {"name": "--best-metric", "type": str, "default": "hybrid_success_then_return_fallback", "help": "保存最优策略的指标：低成功率阶段优先avg_return/avg_min_relative_dist；成功后优先success_rate，其次avg_episode_length（越短越好）"},
-        {"name": "--save-policy-pool", "action": "store_true", "default": True, "help": "启用策略池中间checkpoint保存，默认每10个update保存一次"},
-        {"name": "--no-save-policy-pool", "action": "store_true", "default": False, "help": "禁用策略池中间checkpoint保存（覆盖 --save-policy-pool）"},
-        {"name": "--policy-pool-save-interval-updates", "type": int, "default": 10, "help": "策略池checkpoint保存间隔，单位为PPO update；默认10个update约18.4M steps"},
-        {"name": "--policy-pool-dir-name", "type": str, "default": "policy_pool", "help": "run目录下的策略池子目录名称"},
         # Early stopping
-        {"name": "--early-stop", "action": "store_true", "default": True, "help": "启用早停：主看success_rate，辅看avg_episode_length"},
+        {"name": "--early-stop", "action": "store_true", "default": False, "help": "启用早停：主看success_rate，辅看avg_episode_length"},
         {"name": "--no-early-stop", "action": "store_true", "default": False, "help": "禁用早停（覆盖 --early-stop）"},
         {"name": "--early-stop-patience", "type": int, "default": 20, "help": "连续多少个update没有显著提升后停止训练"},
         {"name": "--early-stop-start-success-rate", "type": float, "default": 0.8, "help": "只有当best success_rate达到该阈值后，才开始累计early-stop patience"},
@@ -565,7 +427,8 @@ def get_args():
         {"name": "--early-stop-length-delta", "type": float, "default": 10.0, "help": "当success_rate近似持平时，avg_episode_length被视为显著改善的最小下降步数"},
         {"name": "--early-stop-min-episodes", "type": int, "default": 64, "help": "单个update至少统计到多少个结束episode才参与best/early-stop判断"},
         # Curriculum learning
-        {"name": "--curriculum", "action": "store_true", "default": False, "help": "Enable automatic multi-stage curriculum learning"},
+        {"name": "--curriculum", "action": "store_true", "default": False, "help": "Enable curriculum learning (kept for command compatibility; curriculum is enabled by default)"},
+        {"name": "--no-curriculum", "action": "store_true", "default": False, "help": "Disable the default automatic multi-stage curriculum learning"},
         {"name": "--curriculum-stable-success-rate", "type": float, "default": 0.98, "help": "Success-rate threshold for success_stability curriculum transitions"},
         {"name": "--curriculum-stable-success-updates", "type": int, "default": 100, "help": "Consecutive PPO updates above the success-rate threshold before a curriculum transition"},
         {"name": "--curriculum-stable-success-min-episodes", "type": int, "default": 64, "help": "Minimum finished episodes in an update before it can count toward curriculum success stability"},
@@ -575,6 +438,11 @@ def get_args():
     args = gymutil.parse_arguments(
         description="RL Policy",
         custom_parameters=custom_parameters)
+
+    # Isaac Gym gymutil drops custom defaults for action-based arguments.
+    # Resolve the effective defaults explicitly while preserving the old positive flags.
+    args.headless = bool(args.headless or not args.viewer)
+    args.curriculum = bool(args.curriculum or not args.no_curriculum)
     
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
@@ -597,18 +465,8 @@ def get_args():
     else:
         args.save_best = True
 
-    if args.no_save_policy_pool:
-        args.save_policy_pool = False
-    else:
-        args.save_policy_pool = True
-    if args.policy_pool_save_interval_updates < 0:
-        raise ValueError("--policy-pool-save-interval-updates must be >= 0")
-    args.policy_pool_dir_name = str(args.policy_pool_dir_name).strip() or "policy_pool"
-
-    if args.no_early_stop:
-        args.early_stop = False
-    else:
-        args.early_stop = True
+    args.early_stop = bool(args.early_stop and not args.no_early_stop)
+    args.no_early_stop = not args.early_stop
 
     # name allignment
     args.sim_device_id = args.compute_device_id
@@ -1201,16 +1059,6 @@ if __name__ == "__main__":
         last_update_score = None
         best_path = os.path.join(run_dir, "best.pth")
         latest_path = os.path.join(run_dir, "latest.pth")
-        policy_pool_dir = os.path.join(run_dir, args.policy_pool_dir_name)
-        policy_pool_manifest_path = os.path.join(policy_pool_dir, "manifest.jsonl")
-        if args.save_policy_pool:
-            os.makedirs(policy_pool_dir, exist_ok=True)
-            print(
-                f"Policy pool checkpointing: ENABLED | dir={policy_pool_dir} "
-                f"| interval_updates={args.policy_pool_save_interval_updates}"
-            )
-        else:
-            print("Policy pool checkpointing: DISABLED")
         reward_cfg = getattr(env_cfg, "reward", None)
         success_threshold = float(getattr(reward_cfg, "success_threshold", 1.0))
         raw_reward_component_keys = [
@@ -1221,10 +1069,6 @@ if __name__ == "__main__":
             key for key in envs.reward_keys if key.startswith("contrib_")
         ]
         for update in range(start_update, num_updates + 1):
-            policy_pool_episode_metrics = None
-            policy_pool_score = None
-            policy_pool_curriculum_transition = None
-
             # 学习率调度
             if args.use_lr_scheduler:
                 # 使用新的 warmup + 余弦衰减调度器（基于global_step）
@@ -1661,39 +1505,6 @@ if __name__ == "__main__":
                     wandb_episode_log["diagnostics/gamma_to_avg_len"] = gamma_to_avg_len
                 wandb_log(wandb_episode_log, global_step, commit=False)
 
-                policy_pool_episode_metrics = {
-                    "finished_episodes": int(episode_rewards_summary["count"]),
-                    "success_rate": succ_rate,
-                    "avg_return": avg_return,
-                    "avg_final_relative_dist": avg_final_dist,
-                    "avg_final_forward_alignment": avg_final_forward_alignment,
-                    "avg_min_relative_dist": avg_min_dist,
-                    "avg_episode_length": avg_len,
-                    "avg_episode_mean_closing_speed": avg_speed,
-                    "avg_approach_fraction": avg_approach_fraction,
-                    "avg_episode_min_hazard_clearance": avg_min_hazard_clearance,
-                    "visibility_metrics": avg_visibility_metrics,
-                    "done_counts": {
-                        "timeout": int(episode_rewards_summary["done_timeout"]),
-                        "collision": int(episode_rewards_summary["done_collision"]),
-                        "success": int(episode_rewards_summary["done_success"]),
-                        "far": int(episode_rewards_summary["done_far"]),
-                    },
-                    "done_rates": {
-                        "timeout": float(episode_rewards_summary["done_timeout"] / done_total),
-                        "collision": float(episode_rewards_summary["done_collision"] / done_total),
-                        "success": float(episode_rewards_summary["done_success"] / done_total),
-                        "far": float(episode_rewards_summary["done_far"] / done_total),
-                    },
-                    "reach_rates": reach_rates,
-                    "reach_rate_current_threshold": current_threshold_reach_rate,
-                    "raw_reward_components": avg_raw_component_returns,
-                    "reward_contrib": {
-                        key.replace("contrib_", "", 1): value
-                        for key, value in avg_contrib_component_returns.items()
-                    },
-                }
-
                 writer.flush()
 
                 # 计算用于选取最优策略的score：
@@ -1713,7 +1524,6 @@ if __name__ == "__main__":
                         float(avg_min_dist),
                         float(avg_len),
                     )
-                policy_pool_score = score
                 last_update_score = score
 
                 # Curriculum transition check
@@ -1723,7 +1533,6 @@ if __name__ == "__main__":
                         episode_rewards_summary=episode_rewards_summary,
                     )
                     if transition is not None:
-                        policy_pool_curriculum_transition = transition
                         print(
                             f"\n{'='*60}\n"
                             f"CURRICULUM TRANSITION\n"
@@ -2090,41 +1899,6 @@ if __name__ == "__main__":
             if curriculum_controller is not None:
                 latest_checkpoint["curriculum"] = curriculum_controller.get_state_dict()
             torch.save(latest_checkpoint, latest_path)
-
-            if should_save_policy_pool_checkpoint(
-                args, update, start_update, policy_pool_curriculum_transition
-            ):
-                policy_pool_checkpoint_path = os.path.join(
-                    policy_pool_dir,
-                    f"ppo_upd_{update:06d}_step_{global_step:010d}.pth",
-                )
-                policy_pool_reasons = policy_pool_save_reason(
-                    args, update, start_update, policy_pool_curriculum_transition
-                )
-                policy_pool_metadata = build_policy_pool_metadata(
-                    args=args,
-                    run_name=run_name,
-                    run_dir=run_dir,
-                    checkpoint_path=policy_pool_checkpoint_path,
-                    global_step=global_step,
-                    update=update,
-                    start_update=start_update,
-                    score=policy_pool_score,
-                    episode_metrics=policy_pool_episode_metrics,
-                    update_metrics=wandb_update_log,
-                    curriculum_controller=curriculum_controller,
-                    curriculum_transition=policy_pool_curriculum_transition,
-                    reasons=policy_pool_reasons,
-                )
-                policy_pool_checkpoint = dict(latest_checkpoint)
-                policy_pool_checkpoint["policy_pool_metadata"] = policy_pool_metadata
-                torch.save(policy_pool_checkpoint, policy_pool_checkpoint_path)
-                append_jsonl(policy_pool_manifest_path, policy_pool_metadata)
-                writer.add_scalar("policy_pool/saved_update", float(update), global_step)
-                print(
-                    f"Policy pool checkpoint saved: {policy_pool_checkpoint_path} "
-                    f"| reasons={','.join(policy_pool_reasons)}"
-                )
 
             if args.early_stop:
                 # When curriculum is active, only apply early stop on the final stage

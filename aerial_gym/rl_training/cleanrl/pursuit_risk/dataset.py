@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections import OrderedDict
+from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Sequence, Tuple, Union
 
@@ -23,18 +23,18 @@ def _read_jsonl(path: Path) -> List[Dict]:
 class NpzLruCache:
     def __init__(self, max_items: int = 16):
         self.max_items = max_items
-        self.cache: OrderedDict[Path, Dict[str, np.ndarray]] = OrderedDict()
+        self.get = lru_cache(maxsize=max_items)(self._load)
 
-    def get(self, path: Path) -> Dict[str, np.ndarray]:
-        if path in self.cache:
-            self.cache.move_to_end(path)
-            return self.cache[path]
+    def __getstate__(self):
+        return {"max_items": self.max_items}
+
+    def __setstate__(self, state):
+        self.__init__(state["max_items"])
+
+    @staticmethod
+    def _load(path: Path) -> Dict[str, np.ndarray]:
         with np.load(path, allow_pickle=False) as data:
-            arrays = {key: data[key] for key in data.files}
-        self.cache[path] = arrays
-        while len(self.cache) > self.max_items:
-            self.cache.popitem(last=False)
-        return arrays
+            return {key: data[key] for key in data.files}
 
 
 def create_memmap(path: Path, shape: Tuple[int, ...], dtype):

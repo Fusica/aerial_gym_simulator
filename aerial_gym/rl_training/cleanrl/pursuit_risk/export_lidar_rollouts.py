@@ -26,9 +26,7 @@ from aerial_gym.rl_training.cleanrl.ppo_guidance import (
 from aerial_gym.rl_training.cleanrl.pursuit_risk.branch import (
     branch_anchor_selection_stats,
     branch_horizon_label_payload,
-    build_branch_metadata_payload,
     candidate_actions_from_policy,
-    lidar_stack_from_history,
     write_branch_chunk,
 )
 from aerial_gym.rl_training.cleanrl.pursuit_risk.contract import (
@@ -152,6 +150,15 @@ def target_mask_stats(semantic_frame: np.ndarray, target_semantic_id: int) -> di
             int(rows.max()) + 1,
         ),
     }
+
+
+def lidar_stack_from_history(history: Sequence[np.ndarray], stack_frames: int) -> np.ndarray:
+    if not history:
+        raise ValueError("LiDAR history is empty")
+    frames = list(history[-stack_frames:])
+    while len(frames) < stack_frames:
+        frames.insert(0, frames[0])
+    return np.stack(frames, axis=0).astype(np.float32, copy=False)
 
 
 TASK_SNAPSHOT_ATTRS = (
@@ -413,6 +420,7 @@ def collect_branch_dataset(args, selected: Sequence[SelectedCheckpoint], target_
                 "starting branch teacher "
                 f"update={item.update} max_anchors={args.branch_max_anchors} "
                 f"max_anchors_per_episode={args.branch_max_anchors_per_episode} "
+                f"num_envs={num_envs} "
                 f"existing_anchors={existing_count} "
                 f"teacher_index={selected_idx}"
             )
@@ -542,7 +550,10 @@ def collect_branch_dataset_for_item(
                     f"anchor_{dataset_anchor_id:06d}",
                 )
                 os.makedirs(anchor_dir, exist_ok=True)
-                anchor_lidar_relpath = os.path.relpath(os.path.join(anchor_dir, "anchor_lidar.npz"), output_dir)
+                anchor_lidar_relpath = os.path.relpath(
+                    os.path.join(anchor_dir, "anchor_lidar.npz"),
+                    output_dir,
+                )
                 robot_body_linvel = task.obs_dict["robot_body_linvel"]
                 robot_body_angvel = task.obs_dict["robot_body_angvel"]
                 robot_quat = task.obs_dict["robot_orientation"]
@@ -554,7 +565,10 @@ def collect_branch_dataset_for_item(
                     .numpy()
                     .astype(np.float32)
                 )
-                anchor_lidar_stack = lidar_stack_from_history(source_lidar_history, args.risk_lidar_stack_frames)
+                anchor_lidar_stack = lidar_stack_from_history(
+                    source_lidar_history,
+                    args.risk_lidar_stack_frames,
+                )
                 source_lidar_frame_steps = list(source_lidar_step_history[-args.risk_lidar_stack_frames:])
                 while len(source_lidar_frame_steps) < args.risk_lidar_stack_frames:
                     source_lidar_frame_steps.insert(0, source_lidar_frame_steps[0])
@@ -578,7 +592,10 @@ def collect_branch_dataset_for_item(
                     -1,
                     dtype=np.int32,
                 )
-                branch_valid_history = np.zeros((num_candidates, args.branch_horizon), dtype=np.bool_)
+                branch_valid_history = np.zeros(
+                    (num_candidates, args.branch_horizon),
+                    dtype=np.bool_,
+                )
                 branch_sim_step_history = np.full(
                     (num_candidates, args.branch_horizon),
                     -1,
@@ -596,7 +613,11 @@ def collect_branch_dataset_for_item(
                             continue
                         branch_slot = idx + 1
                         stats = target_mask_stats(
-                            semantic_tensor[branch_slot, 0].detach().cpu().numpy().astype(np.int32, copy=False),
+                            semantic_tensor[branch_slot, 0]
+                            .detach()
+                            .cpu()
+                            .numpy()
+                            .astype(np.int32, copy=False),
                             target_semantic_id,
                         )
                         branch_target_pixel_count_history[idx, horizon_step] = stats["pixel_count"]
@@ -604,12 +625,18 @@ def collect_branch_dataset_for_item(
                         branch_sim_step_history[idx, horizon_step] = (
                             task.sim_env.sim_steps[branch_slot].detach().cpu().numpy().copy()
                         )
-                        visible_history[idx].append(stats["pixel_count"] >= args.label_min_visible_pixels)
+                        visible_history[idx].append(
+                            stats["pixel_count"] >= args.label_min_visible_pixels
+                        )
                     if torch.all(done_flags):
                         break
                     if horizon_step + 1 >= args.branch_horizon:
                         break
-                    teacher_actions = torch.zeros((num_envs, envs.num_actions), dtype=torch.float32, device=args.device)
+                    teacher_actions = torch.zeros(
+                        (num_envs, envs.num_actions),
+                        dtype=torch.float32,
+                        device=args.device,
+                    )
                     with torch.no_grad():
                         branch_slots = torch.nonzero(~done_flags, as_tuple=False).flatten() + 1
                         if branch_slots.numel():
@@ -639,21 +666,34 @@ def collect_branch_dataset_for_item(
                 metadata_path = os.path.join(anchor_dir, "branch_metadata.npz")
                 np.savez_compressed(
                     metadata_path,
-                    **build_branch_metadata_payload(
-                        schema_version=OUTPUT_SCHEMA_VERSION,
-                        anchor_lidar_relpath=anchor_lidar_relpath,
-                        anchor_ego_obs_np=anchor_ego_obs_np,
-                        candidate_actions=candidate_actions,
-                        horizon_label_payload=horizon_label_payload,
-                    ),
+                    schema_version=np.array(OUTPUT_SCHEMA_VERSION, dtype=np.int32),
+                    anchor_lidar_relative_path=np.array(anchor_lidar_relpath, dtype="U256"),
+                    ego_obs=anchor_ego_obs_np,
+                    candidate_action=candidate_actions.detach().cpu().numpy().astype(np.float32),
+                    **horizon_label_payload,
                     anchor_sim_step=np.asarray(source_lidar_frame_steps[-1], dtype=np.int64),
                     source_lidar_frame_steps=np.asarray(source_lidar_frame_steps, dtype=np.int64),
-                    anchor_target_pixel_count=np.asarray(semantic_stats["pixel_count"], dtype=np.int32),
-                    anchor_target_bbox_xyxy=np.asarray(semantic_stats["bbox_xyxy"], dtype=np.int32),
-                    anchor_selection_score=np.asarray(selection_stats["score"], dtype=np.float32),
+                    anchor_target_pixel_count=np.asarray(
+                        semantic_stats["pixel_count"],
+                        dtype=np.int32,
+                    ),
+                    anchor_target_bbox_xyxy=np.asarray(
+                        semantic_stats["bbox_xyxy"],
+                        dtype=np.int32,
+                    ),
+                    anchor_selection_score=np.asarray(
+                        selection_stats["score"],
+                        dtype=np.float32,
+                    ),
                     anchor_edge_score=np.asarray(selection_stats["edge_score"], dtype=np.float32),
-                    anchor_low_pixel_score=np.asarray(selection_stats["low_pixel_score"], dtype=np.float32),
-                    anchor_edge_distance_px=np.asarray(selection_stats["edge_distance_px"], dtype=np.int32),
+                    anchor_low_pixel_score=np.asarray(
+                        selection_stats["low_pixel_score"],
+                        dtype=np.float32,
+                    ),
+                    anchor_edge_distance_px=np.asarray(
+                        selection_stats["edge_distance_px"],
+                        dtype=np.int32,
+                    ),
                     anchor_robot_body_linvel=robot_body_linvel[anchor_id].detach().cpu().numpy().copy(),
                     anchor_robot_body_angvel=robot_body_angvel[anchor_id].detach().cpu().numpy().copy(),
                     anchor_robot_quat=robot_quat[anchor_id].detach().cpu().numpy().copy(),
@@ -684,9 +724,13 @@ def collect_branch_dataset_for_item(
                 dataset_anchor_id += 1
                 anchors_written += 1
                 episode_anchors += 1
+
                 restore_task_snapshot(task, snapshot, torch.tensor([anchor_id], device=args.device))
                 obs = task.task_obs["observations"].detach().clone()
-                if anchors_written >= args.branch_max_anchors or episode_anchors >= args.branch_max_anchors_per_episode:
+                if (
+                    anchors_written >= args.branch_max_anchors
+                    or episode_anchors >= args.branch_max_anchors_per_episode
+                ):
                     break
 
             with torch.no_grad():
