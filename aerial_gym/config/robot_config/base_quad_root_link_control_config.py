@@ -38,6 +38,8 @@ class BaseQuadRootLinkControlCfg(BaseQuadCfg):
         ]
 
         class motor_model_config:
+            # Keep the pursuit teacher's actuator integration contract explicit.
+            integration_scheme = "rk4"
             use_rps = True
             motor_thrust_constant_min = 0.00001826312
             motor_thrust_constant_max = 0.00001826312

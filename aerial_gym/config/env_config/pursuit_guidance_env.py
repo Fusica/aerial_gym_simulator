@@ -29,6 +29,9 @@ class PursuitGuidanceEnvCfg:
         keep_same_env_for_num_episodes = 1
         write_to_sim_at_every_timestep = False
         use_warp = False
+        # The room, cylinders, and target form a fixed task contract. The
+        # 2.0.1 navigation reset otherwise removes half of them in 15% of envs.
+        randomize_obstacle_count_on_reset = False
 
         lower_bound_min = [0.0, 0.0, 0.0]
         lower_bound_max = [0.0, 0.0, 0.0]

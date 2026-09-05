@@ -280,7 +280,26 @@ class EnvManager(BaseManager):
         # finally reset the robot manager that resets the robot state tensors and the sensors
         # logger.debug(f"Resetting environments {env_ids}.")
         self.IGE_env.reset_idx(env_ids)
-        self.asset_manager.reset_idx(env_ids, self.global_tensor_dict["num_obstacles_in_env"])
+        num_obstacles = self.global_tensor_dict["num_obstacles_in_env"]
+        if num_obstacles > 0:
+            self.asset_manager.reset_idx(env_ids, num_obstacles)
+            if getattr(self.cfg.env, "randomize_obstacle_count_on_reset", True):
+                num_keep_in_env = self.asset_manager.num_keep_in_env
+                self.asset_manager.num_keep_in_env = num_keep_in_env // 2
+                try:
+                    # Preserve the 2.0.1 navigation-domain randomization while
+                    # allowing fixed-layout tasks to opt out explicitly.
+                    samples = torch.bernoulli(
+                        0.15 * torch.ones(len(env_ids), device=self.device)
+                    )
+                    selected_indices = torch.nonzero(samples).squeeze(-1)
+                    if len(selected_indices) > 0:
+                        self.asset_manager.reset_idx(
+                            env_ids[selected_indices], num_obstacles // 2
+                        )
+                finally:
+                    self.asset_manager.num_keep_in_env = num_keep_in_env
+
         if self.cfg.env.use_warp:
             self.warp_env.reset_idx(env_ids)
         self.robot_manager.reset_idx(env_ids)
@@ -310,7 +329,7 @@ class EnvManager(BaseManager):
         )
 
     def reset(self):
-        self.reset_idx(env_ids=torch.arange(self.cfg.env.num_envs))
+        self.reset_idx(env_ids=torch.arange(self.cfg.env.num_envs, device=self.device))
 
     def pre_physics_step(self, actions, env_actions):
         # first let the robot compute the actions
